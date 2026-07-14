@@ -64,6 +64,11 @@ python scripts/list_envs.py
 
 ## Training
 
+**Easy run**:
+```bash
+bash loco_train.sh
+```
+
 To train the state-based manager-based Go2 locomotion policy used by the goal-navigation data collector:
 
 ```bash
@@ -87,6 +92,10 @@ python scripts/quadloco_rsl_rl/play.py \
 ```
 
 ## Goal-Navigation Data Collection
+**Easy run**:
+```bash
+bash loco_collect_data.sh
+```
 
 The data-collection environment uses the trained state-based locomotion policy, a scripted
 goal-to-velocity command, and a robot-mounted RGB-D camera. It does not require training a
