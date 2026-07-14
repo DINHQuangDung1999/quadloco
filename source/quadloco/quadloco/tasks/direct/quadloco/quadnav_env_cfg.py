@@ -23,105 +23,8 @@ from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG  # isort: skip
 from quadloco.terrains import ROUGH_TERRAINS_CFG  # isort: skip
 
 
-def randomize_motor_strength(
-    env,
-    env_ids: torch.Tensor | None,
-    strength_distribution_params: tuple[float, float],
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-):
-    """Scale joint effort limits to approximate motor-strength randomization.
-
-    This updates both the articulation effort limits in simulation and the actuator-side
-    effort clipping tensor used by the DC motor model.
-    """
-    asset = env.scene[asset_cfg.name]
-    if env_ids is None:
-        env_ids = torch.arange(env.scene.num_envs, device=asset.device)
-
-    if asset_cfg.joint_ids == slice(None):
-        joint_ids = slice(None)
-        num_joints = asset.num_joints
-    else:
-        joint_ids = torch.tensor(asset_cfg.joint_ids, dtype=torch.long, device=asset.device)
-        num_joints = len(joint_ids)
-
-    scales = torch.empty((len(env_ids), num_joints), device=asset.device).uniform_(
-        strength_distribution_params[0], strength_distribution_params[1]
-    )
-    default_limits = asset.data.joint_effort_limits[env_ids].clone()
-    scaled_limits = default_limits * scales
-    asset.write_joint_effort_limit_to_sim(scaled_limits, joint_ids=joint_ids, env_ids=env_ids)
-
-    # Keep actuator-side clipping consistent with the randomized effort limits.
-    for actuator in asset.actuators.values():
-        actuator_joint_ids = actuator.joint_indices
-        actuator.effort_limit[env_ids] = asset.data.joint_effort_limits[env_ids][:, actuator_joint_ids]
-        if hasattr(actuator, "effort_limit_sim"):
-            actuator.effort_limit_sim[env_ids] = asset.data.joint_effort_limits[env_ids][:, actuator_joint_ids]
-
-
 @configclass
-class EventCfg:
-    """Configuration for randomization."""
-
-    physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.2, 1.25),
-            "dynamic_friction_range": (0.2, 1.25),
-            "restitution_range": (0.0, 0.0),
-            "num_buckets": 64,
-        },
-    )
-
-    add_base_mass = EventTerm(
-        func=mdp.randomize_rigid_body_mass,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "mass_distribution_params": (-1.0, 2.0),
-            "operation": "add",
-        },
-    )
-
-    base_com = EventTerm(
-        func=mdp.randomize_rigid_body_com,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "com_range": {
-                "x": (-0.05, 0.05),
-                "y": (-0.05, 0.05),
-                "z": (-0.05, 0.05),
-            },
-        },
-    )
-
-    actuator_gains = EventTerm(
-        func=mdp.randomize_actuator_gains,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-            "stiffness_distribution_params": (0.9, 1.1),
-            "damping_distribution_params": (0.9, 1.1),
-            "operation": "scale",
-        },
-    )
-
-    motor_strength = EventTerm(
-        func=randomize_motor_strength,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-            "strength_distribution_params": (0.9, 1.1),
-        },
-    )
-
-
-@configclass
-class UnitreeGo2FlatEnvCfg(DirectRLEnvCfg):
+class UnitreeGo2NavigationFlatEnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 20.0
     decimation = 4
@@ -159,9 +62,6 @@ class UnitreeGo2FlatEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
 
-    # events
-    events: EventCfg = EventCfg()
-
     # robot
     robot: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
@@ -180,15 +80,17 @@ class UnitreeGo2FlatEnvCfg(DirectRLEnvCfg):
     undesired_contact_reward_scale = -1.0
     flat_orientation_reward_scale = -5.0
 
+    goal_tracking_reward_scale = 1.0
+
 
 @configclass
-class UnitreeGo2RoughEnvCfg(DirectRLEnvCfg):
+class UnitreeGo2NavigationRoughEnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 20.0
     decimation = 4
     action_scale = 0.5
     action_space = 12
-    observation_space = 45
+    observation_space = 45 + 3
     state_space = 235
 
     # simulation
@@ -220,9 +122,6 @@ class UnitreeGo2RoughEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
 
-    # events
-    events: EventCfg = EventCfg()
-
     # robot
     robot: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
@@ -239,14 +138,13 @@ class UnitreeGo2RoughEnvCfg(DirectRLEnvCfg):
     action_rate_reward_scale = -0.01
     feet_air_time_reward_scale = 0.5
     undesired_contact_reward_scale = -1.0
-    flat_orientation_reward_scale = -0.5
-
+    flat_orientation_reward_scale = -5.0
 
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="generator",
         terrain_generator=ROUGH_TERRAINS_CFG,
-        max_init_terrain_level=0,
+        max_init_terrain_level=9,
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",

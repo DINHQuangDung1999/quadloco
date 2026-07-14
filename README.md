@@ -1,135 +1,163 @@
-# Template for Isaac Lab Projects
+# Quadloco
 
-## Overview
+Quadloco is an Isaac Lab project for quadruped locomotion experiments.
 
-This project/repository serves as a template for building projects or extensions based on Isaac Lab.
-It allows you to develop in an isolated environment, outside of the core Isaac Lab repository.
+## Setup
 
-**Key Features:**
-
-- `Isolation` Work outside the core Isaac Lab repository, ensuring that your development efforts remain self-contained.
-- `Flexibility` This template is set up to allow your code to be run as an extension in Omniverse.
-
-**Keywords:** extension, template, isaaclab
-
-## Installation
-
-- Install Isaac Lab by following the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html).
-  We recommend using the conda or uv installation as it simplifies calling Python scripts from the terminal.
-
-- Clone or copy this project/repository separately from the Isaac Lab installation (i.e. outside the `IsaacLab` directory):
-
-- Using a python interpreter that has Isaac Lab installed, install the library in editable mode using:
-
-    ```bash
-    # use 'PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-    python -m pip install -e source/quadloco
-
-- Verify that the extension is correctly installed by:
-
-    - Listing the available tasks:
-
-        Note: It the task name changes, it may be necessary to update the search pattern `"Template-"`
-        (in the `scripts/list_envs.py` file) so that it can be listed.
-
-        ```bash
-        # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-        python scripts/list_envs.py
-        ```
-
-    - Running a task:
-
-        ```bash
-        # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-        python scripts/<RL_LIBRARY>/train.py --task=<TASK_NAME>
-        ```
-
-    - Running a task with dummy agents:
-
-        These include dummy agents that output zero or random agents. They are useful to ensure that the environments are configured correctly.
-
-        - Zero-action agent
-
-            ```bash
-            # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-            python scripts/zero_agent.py --task=<TASK_NAME>
-            ```
-        - Random-action agent
-
-            ```bash
-            # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-            python scripts/random_agent.py --task=<TASK_NAME>
-            ```
-
-### Set up IDE (Optional)
-
-To setup the IDE, please follow these instructions:
-
-- Run VSCode Tasks, by pressing `Ctrl+Shift+P`, selecting `Tasks: Run Task` and running the `setup_python_env` in the drop down menu.
-  When running this task, you will be prompted to add the absolute path to your Isaac Sim installation.
-
-If everything executes correctly, it should create a file .python.env in the `.vscode` directory.
-The file contains the python paths to all the extensions provided by Isaac Sim and Omniverse.
-This helps in indexing all the python modules for intelligent suggestions while writing code.
-
-### Setup as Omniverse Extension (Optional)
-
-We provide an example UI extension that will load upon enabling your extension defined in `source/quadloco/quadloco/ui_extension_example.py`.
-
-To enable your extension, follow these steps:
-
-1. **Add the search path of this project/repository** to the extension manager:
-    - Navigate to the extension manager using `Window` -> `Extensions`.
-    - Click on the **Hamburger Icon**, then go to `Settings`.
-    - In the `Extension Search Paths`, enter the absolute path to the `source` directory of this project/repository.
-    - If not already present, in the `Extension Search Paths`, enter the path that leads to Isaac Lab's extension directory directory (`IsaacLab/source`)
-    - Click on the **Hamburger Icon**, then click `Refresh`.
-
-2. **Search and enable your extension**:
-    - Find your extension under the `Third Party` category.
-    - Toggle it to enable your extension.
-
-## Code formatting
-
-We have a pre-commit template to automatically format your code.
-To install pre-commit:
+1. Install Isaac Lab and make sure you can run its Python environment.
+2. Clone this repository.
+3. Install `quadloco` in editable mode:
 
 ```bash
-pip install pre-commit
+cd /path/to/quadloco
+python -m pip install -e source/quadloco
 ```
 
-Then you can run pre-commit with:
+If you are using Isaac Lab's launcher-managed Python instead of a local venv/conda env, use that interpreter instead of `python`.
+
+## Why Editable Install?
+
+The training scripts import `quadloco` as a Python package. Without the editable install, commands such as:
 
 ```bash
-pre-commit run --all-files
+python scripts/quadloco_rl_games/train.py ...
 ```
 
-## Troubleshooting
+can fail with:
 
-### Pylance Missing Indexing of Extensions
-
-In some VsCode versions, the indexing of part of the extensions is missing.
-In this case, add the path to your extension in `.vscode/settings.json` under the key `"python.analysis.extraPaths"`.
-
-```json
-{
-    "python.analysis.extraPaths": [
-        "<path-to-ext-repo>/source/quadloco"
-    ]
-}
+```text
+ModuleNotFoundError: No module named 'quadloco'
 ```
 
-### Pylance Crash
+Editable install only needs to be done once per Python environment.
 
-If you encounter a crash in `pylance`, it is probable that too many files are indexed and you run out of memory.
-A possible solution is to exclude some of omniverse packages that are not used in your project.
-To do so, modify `.vscode/settings.json` and comment out packages under the key `"python.analysis.extraPaths"`
-Some examples of packages that can likely be excluded are:
+## Verify Installation
 
-```json
-"<path-to-isaac-sim>/extscache/omni.anim.*"         // Animation packages
-"<path-to-isaac-sim>/extscache/omni.kit.*"          // Kit UI tools
-"<path-to-isaac-sim>/extscache/omni.graph.*"        // Graph UI tools
-"<path-to-isaac-sim>/extscache/omni.services.*"     // Services tools
-...
+List available tasks:
+
+```bash
+python scripts/list_envs.py
 ```
+
+## Training
+
+RL-Games:
+
+```bash
+python scripts/quadloco_rl_games/train.py --task Unitree-Quadloco-Direct-Flat-v0
+```
+
+RSL-RL:
+
+```bash
+python scripts/quadloco_rsl_rl/train.py --task Unitree-Quadloco-Direct-Flat-v0
+```
+
+To train the state-based manager-based Go2 locomotion policy used by the goal-navigation data collector:
+
+```bash
+python scripts/quadloco_rsl_rl/train.py \
+    --task Unitree-Go2-Quadloco-ManagerBased-Rough-v0 \
+    --headless
+```
+
+The RSL-RL runs and checkpoints are written under:
+
+```text
+logs/rsl_rl/unitree_go2_rough_loco/
+```
+
+To play a trained locomotion checkpoint in the standard rough-terrain environment, run:
+
+```bash
+python scripts/quadloco_rsl_rl/play.py \
+    --task Unitree-Go2-Quadloco-ManagerBased-Rough-PLAY-v0 \
+    --checkpoint /path/to/model.pt
+```
+
+SB3:
+
+```bash
+python scripts/quadloco_sb3/train.py --task Unitree-Quadloco-Direct-Flat-v0
+```
+
+SKRL:
+
+```bash
+python scripts/quadloco_skrl/train.py --task Unitree-Quadloco-Direct-Flat-v0
+```
+
+## Goal-Navigation Data Collection
+
+The data-collection environment uses the trained state-based locomotion policy, a scripted
+goal-to-velocity command, and a robot-mounted RGB-D camera. It does not require training a
+separate navigation policy before collection.
+
+Collect 10 complete trajectories with:
+
+```bash
+python scripts/quadloco_rsl_rl/run_data_collection.py \
+    --task Unitree-Go2-Quadloco-ManagerBased-Rough-DataCollection-v0 \
+    --checkpoint /path/to/model.pt \
+    --collect_data \
+    --num_episodes 10 \
+    --dataset_dir datasets/goal_navigation \
+    --headless
+```
+
+Relevant arguments:
+
+- `--collect_data` enables RGB-D trajectory buffering and saving. Without this flag, the
+  script behaves as a normal play loop and does not write a dataset.
+- `--num_episodes N` sets the number of completed trajectories to save. The default is 10.
+- `--dataset_dir PATH` sets the output directory. The default is
+  `datasets/goal_navigation`.
+- `--num_envs N` controls parallel environments. The default is 1 to prevent neighboring
+  environments from appearing in the camera images.
+- `--checkpoint PATH` selects the trained locomotion checkpoint.
+- `--headless` disables the interactive viewer. Omit it to watch the robot-following viewer.
+
+Camera rendering is enabled automatically by the collection script. Each episode is saved
+immediately as a separate file:
+
+```text
+datasets/goal_navigation/
+├── trajectory_000000.pt
+├── trajectory_000001.pt
+└── ...
+```
+
+Load a trajectory with:
+
+```python
+import torch
+
+trajectory = torch.load("datasets/goal_navigation/trajectory_000000.pt")
+rgb = trajectory["rgb"]
+depth = trajectory["depth"]
+joint_actions = trajectory["action"]
+velocity_commands = trajectory["velocity_command"]
+```
+
+`action` contains the low-level locomotion policy output, while `velocity_command` contains
+the scripted `[vx, vy, wz]` target suitable as supervision for a future local navigation
+module.
+
+## Quick Checks
+
+Zero-action agent:
+
+```bash
+python scripts/zero_agent.py --task Unitree-Quadloco-Direct-Flat-v0
+```
+
+Random-action agent:
+
+```bash
+python scripts/random_agent.py --task Unitree-Quadloco-Direct-Flat-v0
+```
+
+## Notes
+
+- For direct environments, actor observations come from `"policy"` and privileged critic observations come from `"critic"`.
+- If you change task names or add new tasks, `scripts/list_envs.py` is the quickest way to confirm they are registered correctly.
