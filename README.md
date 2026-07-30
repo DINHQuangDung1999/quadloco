@@ -117,6 +117,8 @@ Relevant arguments:
 
 - `--collect_data` enables RGB-D trajectory buffering and saving. Without this flag, the
   script behaves as a normal play loop and does not write a dataset.
+- `--dataset_format pt|lerobot` selects legacy per-episode PyTorch files or a directly
+  loadable LeRobot v3 dataset. The default remains `pt`.
 - `--num_episodes N` sets the number of completed trajectories to save. The default is 10.
 - `--dataset_dir PATH` sets the output directory. The default is
   `datasets/goal_navigation`.
@@ -150,3 +152,39 @@ velocity_commands = trajectory["velocity_command"]
 `action` contains the low-level locomotion policy output, while `velocity_command` contains
 the scripted `[vx, vy, wz]` target suitable as supervision for a future local navigation
 module.
+
+### Record directly in LeRobot v3 format
+
+Install the sibling LeRobot checkout in the same Python environment as Isaac Lab:
+
+```bash
+pip install -e ../lerobot
+```
+
+Then record into a new output directory:
+
+```bash
+python scripts/quadloco_rsl_rl/run_data_collection.py \
+    --task Unitree-Go2-Quadloco-ManagerBased-Rough-DataCollection-v0 \
+    --checkpoint /path/to/model.pt \
+    --collect_data \
+    --dataset_format lerobot \
+    --dataset_repo_id YOUR_HF_USERNAME/quadloco-goal-navigation \
+    --dataset_task "Navigate to the target" \
+    --dataset_dir datasets/quadloco_lerobot_v1 \
+    --num_episodes 10 \
+    --num_envs 1 \
+    --headless
+```
+
+The output directory must not already exist. LeRobot writes RGB frames as MP4 video and
+state, action, episode, task, and statistics metadata as Parquet/JSON files. The top-level
+`action` is the navigation command `[vx, vy, wz]`, and `observation.state` is the measured
+base velocity `[vx, vy, wz]`. The full locomotion-policy observation and 12-dimensional
+joint-policy output are retained as `observation.policy_state` and
+`observation.low_level_action`.
+Metric depth is omitted by default because storing full-resolution float32 depth in
+Parquet is large; add `--lerobot_include_depth` when it is required.
+
+Add `--push_to_hub` to upload the finalized dataset using `--dataset_repo_id`. Authentication
+must already be configured with `hf auth login`.

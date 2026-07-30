@@ -1,5 +1,6 @@
 import isaaclab.sim as sim_utils
 from isaaclab.envs import ViewerCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
@@ -111,8 +112,39 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
             ),
         )
 
+        # Alternative three-object navigation setting (uncomment to enable):
+        #
+        # - The robot starts close to its environment origin, with small pose
+        #   randomization and faces approximately toward the objects.
+        # - Three candidate objects share x=5 m. Their y coordinates are
+        #   -1, 0, and +1 m, so the middle object is centered at y=0.
+        # - All three objects are visible, but one is randomly selected as the
+        #   true goal on every reset. The goal uses the first configured marker
+        #   style (pyramid/red); distractors use the remaining styles.
+        #
+        # self.events.reset_base.params["pose_range"].update(
+        #     {"x": (-0.15, 0.15), "y": (-0.15, 0.15), "yaw": (-0.10, 0.10)}
+        # )
+        # self.commands.base_velocity.ranges.pos_x = (5.0, 5.0)
+        # self.commands.base_velocity.ranges.pos_y = (0.0, 0.0)
+        # self.commands.base_velocity.candidate_y_offsets = (-1.0, 0.0, 1.0)
+
         # End an episode after the robot stays within the goal tolerance for 2 seconds.
         self.terminations.goal_reached = DoneTerm(
             func=mdp.goal_reached_for_duration,
             params={"command_name": "base_velocity", "duration_s": 0.2},
         )
+
+        self.scene.kitchen = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Kitchen",
+            init_state=AssetBaseCfg.InitialStateCfg(
+                pos=(0.0, 0.0, 0.0),
+            ),
+            spawn=sim_utils.UsdFileCfg(
+                usd_path="/home/dung-admin/quadloco_ws/assets/kitchen/kitchen.usdc",
+                collision_props=sim_utils.CollisionPropertiesCfg(
+                    collision_enabled=True,
+                ),
+            ),
+        )
+        self.scene.terrain = None

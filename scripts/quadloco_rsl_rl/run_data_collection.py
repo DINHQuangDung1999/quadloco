@@ -52,6 +52,38 @@ parser.add_argument(
     default="datasets/goal_navigation",
     help="Directory in which completed trajectories are saved.",
 )
+parser.add_argument(
+    "--dataset_format",
+    choices=("pt", "lerobot"),
+    default="pt",
+    help="Output format. 'pt' preserves the legacy per-episode files; 'lerobot' writes a LeRobot v3 dataset.",
+)
+parser.add_argument(
+    "--dataset_repo_id",
+    type=str,
+    default="quadloco/goal_navigation",
+    help="LeRobot dataset identifier stored in metadata and used when pushing to Hugging Face.",
+)
+parser.add_argument(
+    "--dataset_task",
+    type=str,
+    default="Navigate to the target",
+    help="Natural-language task attached to every recorded LeRobot frame.",
+)
+parser.add_argument(
+    "--lerobot_include_depth",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help=(
+        "Store metric depth as float32 arrays in Parquet (enabled by default). "
+        "Use --no-lerobot_include_depth to omit it and reduce dataset size."
+    ),
+)
+parser.add_argument(
+    "--push_to_hub",
+    action="store_true",
+    help="Push the finalized LeRobot dataset to the Hugging Face Hub.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -82,6 +114,7 @@ import os
 import time
 
 import gymnasium as gym
+import numpy as np
 import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -109,6 +142,117 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import quadloco.tasks  # noqa: F401
+
+
+def _cpu_numpy(tensor: torch.Tensor, dtype: np.dtype | None = None) -> np.ndarray:
+    """Detach one recorded sample and return a contiguous NumPy array."""
+    array = tensor.detach().cpu().numpy()
+    if dtype is not None:
+        array = array.astype(dtype, copy=False)
+    return np.ascontiguousarray(array)
+
+
+def _rgb_frame(tensor: torch.Tensor) -> np.ndarray:
+    """Convert an Isaac Lab RGB/RGBA observation to a LeRobot RGB frame."""
+    frame = _cpu_numpy(tensor)
+    if frame.ndim != 3 or frame.shape[-1] not in (3, 4):
+        raise ValueError(f"Expected an HWC RGB/RGBA frame, got shape {frame.shape}.")
+    if frame.shape[-1] == 4:
+        frame = frame[..., :3]
+    if np.issubdtype(frame.dtype, np.floating):
+        # Isaac Lab emits uint8 when RGB normalization is disabled, but accept
+        # normalized float images as well to make this boundary robust.
+        if frame.size and float(frame.max()) <= 1.0:
+            frame = frame * 255.0
+        frame = np.clip(frame, 0, 255).astype(np.uint8)
+    elif frame.dtype != np.uint8:
+        frame = np.clip(frame, 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(frame)
+
+
+def _depth_frame(tensor: torch.Tensor) -> np.ndarray:
+    """Convert metric depth to finite float32 values for Parquet storage."""
+    frame = _cpu_numpy(tensor, np.float32)
+    return np.ascontiguousarray(np.nan_to_num(frame, nan=0.0, posinf=0.0, neginf=0.0))
+
+
+def _create_lerobot_dataset(
+    dataset_dir: str,
+    repo_id: str,
+    fps: int,
+    rgb: torch.Tensor,
+    base_velocity: torch.Tensor,
+    policy_observation: torch.Tensor,
+    low_level_action: torch.Tensor,
+    velocity_command: torch.Tensor,
+    depth: torch.Tensor | None,
+):
+    """Create a LeRobot v3 dataset using shapes observed from the environment."""
+    try:
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    except ImportError as exc:
+        raise ImportError(
+            "LeRobot is required for --dataset_format lerobot. Install the sibling "
+            "repository with `pip install -e ../lerobot` in the Isaac Lab environment."
+        ) from exc
+
+    root = os.path.abspath(dataset_dir)
+    if os.path.exists(root):
+        raise FileExistsError(
+            f"LeRobot dataset directory already exists: {root}. "
+            "Choose a new --dataset_dir to avoid overwriting data."
+        )
+
+    rgb_sample = _rgb_frame(rgb)
+    state_sample = _cpu_numpy(base_velocity, np.float32)
+    policy_state_sample = _cpu_numpy(policy_observation, np.float32)
+    low_level_action_sample = _cpu_numpy(low_level_action, np.float32)
+    command_sample = _cpu_numpy(velocity_command, np.float32)
+    height, width, channels = rgb_sample.shape
+    features = {
+        "observation.images.camera1": {
+            "dtype": "video",
+            "shape": (channels, height, width),
+            "names": ["channels", "height", "width"],
+        },
+        "observation.state": {
+            "dtype": "float32",
+            "shape": state_sample.shape,
+            "names": ["vx", "vy", "wz"] if state_sample.shape == (3,) else None,
+        },
+        "action": {
+            "dtype": "float32",
+            "shape": low_level_action_sample.shape,
+            "names": None,
+        },
+        "observation.policy_state": {
+            "dtype": "float32",
+            "shape": policy_state_sample.shape,
+            "names": None,
+        },
+        "observation.velocity_command": {
+            "dtype": "float32",
+            "shape": command_sample.shape,
+            "names": ["vx", "vy", "wz"] if command_sample.shape == (3,) else None,
+        },
+    }
+    if depth is not None:
+        depth_sample = _depth_frame(depth)
+        features["observation.depth.camera1"] = {
+            "dtype": "float32",
+            "shape": depth_sample.shape,
+            "names": None,
+        }
+
+    return LeRobotDataset.create(
+        repo_id=repo_id,
+        root=root,
+        fps=fps,
+        robot_type="quadloco",
+        features=features,
+        use_videos=True,
+        image_writer_threads=4,
+    )
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -221,9 +365,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     ]
     num_collected = 0
     collect_data = args_cli.collect_data
+    lerobot_dataset = None
     if collect_data:
-        os.makedirs(dataset_dir, exist_ok=True)
-        print(f"[INFO] Collecting {args_cli.num_episodes} trajectories in: {dataset_dir}")
+        if args_cli.dataset_format == "lerobot" and num_envs != 1:
+            raise ValueError(
+                "LeRobot recording currently requires --num_envs 1 because episode frames "
+                "must be written sequentially."
+            )
+        if args_cli.dataset_format == "pt":
+            os.makedirs(dataset_dir, exist_ok=True)
+        print(
+            f"[INFO] Collecting {args_cli.num_episodes} trajectories in "
+            f"{args_cli.dataset_format} format: {dataset_dir}"
+        )
 
     # In collection mode, stop after exactly the requested number of episodes.
     while simulation_app.is_running() and (not collect_data or num_collected < args_cli.num_episodes):
@@ -240,13 +394,47 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if collect_data:
                 camera_obs = obs["camera"]
                 velocity_commands = env.unwrapped.command_manager.get_command("base_velocity")
-                for env_id in range(num_envs):
-                    trajectories[env_id]["rgb"].append(camera_obs["rgb"][env_id].cpu().clone())
-                    trajectories[env_id]["depth"].append(camera_obs["depth"][env_id].cpu().clone())
-                    trajectories[env_id]["action"].append(applied_actions[env_id].cpu().clone())
-                    trajectories[env_id]["velocity_command"].append(
-                        velocity_commands[env_id].cpu().clone()
-                    )
+                robot_data = env.unwrapped.scene["robot"].data
+                base_velocities = torch.cat(
+                    (robot_data.root_lin_vel_b[:, :2], robot_data.root_ang_vel_b[:, 2:3]), dim=-1
+                )
+                if args_cli.dataset_format == "lerobot":
+                    if lerobot_dataset is None:
+                        fps = round(1.0 / dt)
+                        lerobot_dataset = _create_lerobot_dataset(
+                            dataset_dir=dataset_dir,
+                            repo_id=args_cli.dataset_repo_id,
+                            fps=fps,
+                            rgb=camera_obs["rgb"][0],
+                            base_velocity=base_velocities[0],
+                            policy_observation=obs["policy"][0],
+                            low_level_action=applied_actions[0],
+                            velocity_command=velocity_commands[0],
+                            depth=camera_obs["depth"][0] if args_cli.lerobot_include_depth else None,
+                        )
+                        print(f"[INFO] Initialized LeRobot v3 dataset at: {lerobot_dataset.root}")
+
+                    frame = {
+                        "observation.images.camera1": _rgb_frame(camera_obs["rgb"][0]),
+                        "observation.state": _cpu_numpy(base_velocities[0], np.float32),
+                        "observation.policy_state": _cpu_numpy(obs["policy"][0], np.float32),
+                        "observation.velocity_command": _cpu_numpy(
+                            velocity_commands[0], np.float32
+                        ),
+                        "action": _cpu_numpy(applied_actions[0], np.float32),
+                        "task": args_cli.dataset_task,
+                    }
+                    if args_cli.lerobot_include_depth:
+                        frame["observation.depth.camera1"] = _depth_frame(camera_obs["depth"][0])
+                    lerobot_dataset.add_frame(frame)
+                else:
+                    for env_id in range(num_envs):
+                        trajectories[env_id]["rgb"].append(camera_obs["rgb"][env_id].cpu().clone())
+                        trajectories[env_id]["depth"].append(camera_obs["depth"][env_id].cpu().clone())
+                        trajectories[env_id]["action"].append(applied_actions[env_id].cpu().clone())
+                        trajectories[env_id]["velocity_command"].append(
+                            velocity_commands[env_id].cpu().clone()
+                        )
 
             obs, _, dones, _ = env.step(actions)
 
@@ -256,32 +444,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             for env_id in done_env_ids if collect_data else []:
                 if num_collected >= args_cli.num_episodes:
                     break
-                trajectory = {
-                    key: torch.stack(values) for key, values in trajectories[env_id].items()
-                }
-                trajectory["env_id"] = env_id
-                trajectory["dt"] = dt
-                output_path = os.path.join(dataset_dir, f"trajectory_{num_collected:06d}.pt")
-                torch.save(trajectory, output_path)
-
-                # Alternative NumPy format (also add ``import numpy as np``):
-                # numpy_path = os.path.join(dataset_dir, f"trajectory_{num_collected:06d}.npz")
-                # np.savez_compressed(
-                #     numpy_path,
-                #     rgb=trajectory["rgb"].numpy(),
-                #     depth=trajectory["depth"].numpy(),
-                #     action=trajectory["action"].numpy(),
-                #     velocity_command=trajectory["velocity_command"].numpy(),
-                #     env_id=trajectory["env_id"],
-                #     dt=trajectory["dt"],
-                # )
+                if args_cli.dataset_format == "lerobot":
+                    episode_steps = lerobot_dataset.episode_buffer["size"]
+                    lerobot_dataset.save_episode()
+                    output_path = lerobot_dataset.root
+                else:
+                    trajectory = {
+                        key: torch.stack(values) for key, values in trajectories[env_id].items()
+                    }
+                    trajectory["env_id"] = env_id
+                    trajectory["dt"] = dt
+                    output_path = os.path.join(dataset_dir, f"trajectory_{num_collected:06d}.pt")
+                    torch.save(trajectory, output_path)
+                    episode_steps = trajectory["action"].shape[0]
                 num_collected += 1
                 print(
                     f"[INFO] Saved trajectory {num_collected}/{args_cli.num_episodes} "
-                    f"({trajectory['action'].shape[0]} steps): {output_path}"
+                    f"({episode_steps} steps): {output_path}"
                 )
 
-            for env_id in done_env_ids if collect_data else []:
+            for env_id in done_env_ids if collect_data and args_cli.dataset_format == "pt" else []:
                 trajectories[env_id] = {
                     "rgb": [],
                     "depth": [],
@@ -299,6 +481,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    if lerobot_dataset is not None:
+        lerobot_dataset.finalize()
+        print(f"[INFO] Finalized LeRobot dataset: {lerobot_dataset.root}")
+        if args_cli.push_to_hub:
+            lerobot_dataset.push_to_hub()
+            print(f"[INFO] Pushed dataset to: https://huggingface.co/datasets/{args_cli.dataset_repo_id}")
 
     # close the simulator
     env.close()

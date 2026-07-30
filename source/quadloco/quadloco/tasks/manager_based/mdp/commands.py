@@ -66,6 +66,10 @@ class UniformGoalVelocityCommand(CommandTerm):
         self.goal_generation = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.velocity_command = torch.zeros(self.num_envs, 3, device=self.device)
         self.marker_indices = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+        self.candidate_pos_w = torch.zeros(self.num_envs, 1, 3, device=self.device)
+        self.candidate_marker_indices = torch.zeros(
+            self.num_envs, 1, dtype=torch.int32, device=self.device
+        )
 
         self.metrics["position_error"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["heading_error"] = torch.zeros(self.num_envs, device=self.device)
@@ -87,12 +91,33 @@ class UniformGoalVelocityCommand(CommandTerm):
     def _resample_command(self, env_ids: Sequence[int]):
         if isinstance(env_ids, slice):
             env_ids = torch.arange(self.num_envs, device=self.device)
-        self.goal_pos_w[env_ids] = self._env.scene.env_origins[env_ids]
+        else:
+            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
         samples = torch.empty(len(env_ids), 2, device=self.device)
         samples[:, 0].uniform_(*self.cfg.ranges.pos_x)
         samples[:, 1].uniform_(*self.cfg.ranges.pos_y)
-        self.goal_pos_w[env_ids, :2] += samples
-        self.goal_pos_w[env_ids, 2] += self.cfg.marker_height
+        center_pos_w = self._env.scene.env_origins[env_ids].clone()
+        center_pos_w[:, :2] += samples
+        center_pos_w[:, 2] += self.cfg.marker_height
+
+        candidate_y_offsets = self.cfg.candidate_y_offsets or (0.0,)
+        num_candidates = len(candidate_y_offsets)
+        if self.candidate_pos_w.shape[1] != num_candidates:
+            self.candidate_pos_w = torch.zeros(
+                self.num_envs, num_candidates, 3, device=self.device
+            )
+            self.candidate_marker_indices = torch.zeros(
+                self.num_envs, num_candidates, dtype=torch.int32, device=self.device
+            )
+        self.candidate_pos_w[env_ids] = center_pos_w[:, None, :]
+        offsets = torch.tensor(candidate_y_offsets, device=self.device)
+        self.candidate_pos_w[env_ids, :, 1] += offsets[None, :]
+        goal_candidate_indices = torch.randint(
+            num_candidates, size=(len(env_ids),), device=self.device
+        )
+        self.goal_pos_w[env_ids] = self.candidate_pos_w[
+            env_ids, goal_candidate_indices
+        ]
         # Clear state associated with the previous goal immediately. CommandTerm
         # calls this method on both timed resampling and episode reset.
         self.goal_reached[env_ids] = False
@@ -106,6 +131,23 @@ class UniformGoalVelocityCommand(CommandTerm):
             device=self.device,
             dtype=torch.int32,
         )
+        num_marker_styles = len(self.cfg.goal_visualizer_cfg.markers)
+        if num_candidates > 1 and num_marker_styles < 2:
+            raise ValueError("Multiple candidate objects require at least two marker styles.")
+        # Style 0 is the consistent visual cue for the true goal. Distractors
+        # use any of the remaining styles, so a vision policy can identify the
+        # selected object from the image.
+        if num_candidates > 1:
+            self.candidate_marker_indices[env_ids] = torch.randint(
+                1,
+                num_marker_styles,
+                size=(len(env_ids), num_candidates),
+                device=self.device,
+                dtype=torch.int32,
+            )
+        else:
+            self.candidate_marker_indices[env_ids] = 0
+        self.candidate_marker_indices[env_ids, goal_candidate_indices] = 0
 
     def _update_command(self):
         target_vec_w = self.goal_pos_w - self.robot.data.root_pos_w
@@ -157,8 +199,8 @@ class UniformGoalVelocityCommand(CommandTerm):
         if not self.robot.is_initialized:
             return
         self.goal_visualizer.visualize(
-            translations=self.goal_pos_w,
-            marker_indices=self.marker_indices,
+            translations=self.candidate_pos_w.reshape(-1, 3),
+            marker_indices=self.candidate_marker_indices.reshape(-1),
         )
 
         base_pos_w = self.robot.data.root_pos_w.clone()
@@ -211,6 +253,9 @@ class UniformGoalVelocityCommandCfg(CommandTermCfg):
     slowdown_distance: float = 0.75
     marker_shapes: tuple[str, ...] = ("pyramid", "cube", "sphere")
     marker_colors: tuple[str, ...] = ("red", "green", "blue")
+    # When set, show one candidate object at each lateral offset from the
+    # sampled center. Exactly one candidate is sampled as the navigation goal.
+    candidate_y_offsets: tuple[float, ...] | None = None
 
     @configclass
     class Ranges:
@@ -251,6 +296,8 @@ class UniformGoalVelocityCommandCfg(CommandTermCfg):
             raise ValueError(f"Unsupported goal marker colors: {sorted(invalid_colors)}")
         if not self.marker_shapes or not self.marker_colors:
             raise ValueError("At least one goal marker shape and color must be configured.")
+        if self.candidate_y_offsets is not None and not self.candidate_y_offsets:
+            raise ValueError("candidate_y_offsets must contain at least one offset.")
         if self.slowdown_distance <= self.goal_tolerance:
             raise ValueError("slowdown_distance must be greater than goal_tolerance.")
 

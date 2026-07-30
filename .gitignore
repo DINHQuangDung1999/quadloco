@@ -73,3 +73,5 @@ tests/
 # TacSL sensor
 **/tactile_record/*
 **/gelsight_r15_data/*
+.vscode/browse.vc.db*
+*/browse.vc.db
