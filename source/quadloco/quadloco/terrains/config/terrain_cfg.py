@@ -6,7 +6,7 @@
 """Configuration for custom terrains."""
 
 import isaaclab.terrains as terrain_gen
-from isaaclab_quadlocofault.terrains import CustomHfRandomUniformTerrainCfg
+from quadloco.terrains import CustomHfRandomUniformTerrainCfg
 from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
 
 ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(

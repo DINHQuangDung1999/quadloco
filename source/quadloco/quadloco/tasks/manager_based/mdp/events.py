@@ -2,24 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import torch
-from typing import TYPE_CHECKING, Literal
-import omni.usd
-from isaaclab.assets import RigidObject,Articulation, AssetBase
-from isaaclab.managers import SceneEntityCfg, ManagerTermBase
-import isaaclab.utils.math as math_utils
-from isaaclab.envs.mdp.events import _randomize_prop_by_op
-from isaaclab.actuators import DCMotor
-from isaaclab_quadlocofault.actuators import CustomDCMotor
-from isaaclab.sensors import RayCasterCamera
-from isaaclab.utils.math import quat_from_euler_xyz, sample_uniform
-
-if TYPE_CHECKING:
-    from isaaclab.envs import  ManagerBasedEnv
-    from isaaclab.managers import EventTermCfg
-
+from isaaclab.managers import SceneEntityCfg
 
 def randomize_motor_strength(
     env,

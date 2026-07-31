@@ -8,16 +8,19 @@ The current project setup has been tested with:
 
 - Isaac Lab `2.3.2` (workspace commit `4df6560e187f2cc66685b41b21b259f4485d0c22`)
 - Isaac Sim `5.1.0.0`
-- RSL-RL (`rsl-rl-lib`) `2.3.1`
+- RSL-RL (`rsl-rl-lib`) `5.0.1`
 - Python `3.11`
 
-Isaac Sim, RSL-RL, and Python are from the `env_isaaclab` Conda environment used for this
-project; the Isaac Lab version is from the sibling workspace checkout. Verify the installed
-Python-package versions with:
-
-```bash
-conda activate env_isaaclab
-python -m pip show isaacsim rsl-rl-lib
+If you have already cloned IsaacLab, switch to the specific commit with 
+```bash 
+cd IsaacLab
+git status
+git fetch origin
+git checkout 4df6560e187f2cc66685b41b21b259f4485d0c22
+```
+then reinstall 
+```bash 
+./isaaclab.sh --install
 ```
 
 Verify the checked-out Isaac Lab version with:
@@ -25,6 +28,14 @@ Verify the checked-out Isaac Lab version with:
 ```bash
 cat ../IsaacLab/VERSION
 git -C ../IsaacLab rev-parse HEAD
+```
+Isaac Sim, RSL-RL, and Python are from the `env_isaaclab` Conda environment used for this
+project; the Isaac Lab version is from the sibling workspace checkout. Verify the installed
+Python-package versions with:
+
+```bash
+conda activate env_isaaclab
+python -m pip show isaacsim rsl-rl-lib
 ```
 
 ## Setup
@@ -37,8 +48,6 @@ git -C ../IsaacLab rev-parse HEAD
 cd /path/to/quadloco
 python -m pip install -e source/quadloco
 ```
-
-## Why Editable Install?
 
 The training scripts import `quadloco` as a Python package. Without the editable install, commands such as:
 
