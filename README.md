@@ -1,84 +1,73 @@
 # Quadloco
 
-Quadloco is an Isaac Lab project for quadruped locomotion experiments.
+Quadloco is an Isaac Lab project for training quadruped locomotion policies and
+collecting goal-navigation data for vision-language-action (VLA) training.
 
-## Tested Versions
+## Tested versions
 
-The current project setup has been tested with:
-
-- Isaac Lab `2.3.2` (workspace commit `4df6560e187f2cc66685b41b21b259f4485d0c22`)
+- Isaac Lab `2.3.2` (commit `4df6560e187f2cc66685b41b21b259f4485d0c22`)
 - Isaac Sim `5.1.0.0`
 - RSL-RL (`rsl-rl-lib`) `5.0.1`
 - Python `3.11`
 
-If you have already cloned IsaacLab, switch to the specific commit with 
-```bash 
-cd IsaacLab
+## Setup
+
+Install Isaac Lab by following its installation guide, then place Quadloco next
+to the Isaac Lab checkout:
+
+```text
+workspace/
+├── IsaacLab/
+└── quadloco/
+```
+
+Quadloco was tested against a specific Isaac Lab commit. In the Isaac Lab
+checkout, select that commit and reinstall it:
+
+```bash
+cd /path/to/IsaacLab
 git status
 git fetch origin
 git checkout 4df6560e187f2cc66685b41b21b259f4485d0c22
-```
-then reinstall 
-```bash 
 ./isaaclab.sh --install
 ```
 
-Verify the checked-out Isaac Lab version with:
-
-```bash
-cat ../IsaacLab/VERSION
-git -C ../IsaacLab rev-parse HEAD
-```
-Isaac Sim, RSL-RL, and Python are from the `env_isaaclab` Conda environment used for this
-project; the Isaac Lab version is from the sibling workspace checkout. Verify the installed
-Python-package versions with:
+Activate the Isaac Lab environment, enter the Quadloco repository, and install
+the project:
 
 ```bash
 conda activate env_isaaclab
-python -m pip show isaacsim rsl-rl-lib
-```
-
-## Setup
-
-1. Install Isaac Lab and make sure you can run its Python environment.
-2. Clone this repository and put on the same level with Isaac Lab.
-3. Install `quadloco` in editable mode:
-
-```bash
 cd /path/to/quadloco
 python -m pip install -e source/quadloco
 ```
 
-The training scripts import `quadloco` as a Python package. Without the editable install, commands such as:
+All commands below assume that the current directory is the Quadloco repository
+root. The editable install only needs to be performed once per Python
+environment.
 
-```bash
-python scripts/quadloco_rsl_rl/train.py ...
-```
-
-can fail with:
-
-```text
-ModuleNotFoundError: No module named 'quadloco'
-```
-
-Editable install only needs to be done once per Python environment.
-
-## Verify Installation
-
-List available tasks:
+Verify the setup by listing the registered environments:
 
 ```bash
 python scripts/list_envs.py
 ```
 
-## Training
+To check the installed versions:
 
-**Easy run**:
+```bash
+cat ../IsaacLab/VERSION
+git -C ../IsaacLab rev-parse HEAD
+python -m pip show isaacsim rsl-rl-lib
+```
+
+## 1. Train the locomotion policy
+
+Run the provided training command:
+
 ```bash
 bash loco_train.sh
 ```
 
-To train the state-based manager-based Go2 locomotion policy used by the goal-navigation data collector:
+The equivalent explicit command is:
 
 ```bash
 python scripts/quadloco_rsl_rl/train.py \
@@ -86,13 +75,13 @@ python scripts/quadloco_rsl_rl/train.py \
     --headless
 ```
 
-The RSL-RL runs and checkpoints are written under:
+Runs and checkpoints are written to:
 
 ```text
 logs/rsl_rl/unitree_go2_rough_loco/
 ```
 
-To play a trained locomotion checkpoint in the standard rough-terrain environment, run:
+To play a trained checkpoint:
 
 ```bash
 python scripts/quadloco_rsl_rl/play.py \
@@ -100,17 +89,28 @@ python scripts/quadloco_rsl_rl/play.py \
     --checkpoint /path/to/model.pt
 ```
 
-## Goal-Navigation Data Collection
-**Easy run**:
+## 2. Collect goal-navigation data
+
+The collection environment combines:
+
+- the trained state-based locomotion policy;
+- a scripted goal-to-velocity command; and
+- a robot-mounted RGB-D camera.
+
+No separate navigation policy is required for data collection.
+
+### Quick start
+
+Update the checkpoint, dataset path, repository ID, and other settings in
+`loco_collect_data.sh`, then run:
+
 ```bash
 bash loco_collect_data.sh
 ```
 
-The data-collection environment uses the trained state-based locomotion policy, a scripted
-goal-to-velocity command, and a robot-mounted RGB-D camera. It does not require training a
-separate navigation policy before collection.
+### Explicit command
 
-Collect 10 complete trajectories with:
+The following example collects ten trajectories in the default PyTorch format:
 
 ```bash
 python scripts/quadloco_rsl_rl/run_data_collection.py \
@@ -122,22 +122,25 @@ python scripts/quadloco_rsl_rl/run_data_collection.py \
     --headless
 ```
 
-Relevant arguments:
+Important options:
 
-- `--collect_data` enables RGB-D trajectory buffering and saving. Without this flag, the
-  script behaves as a normal play loop and does not write a dataset.
-- `--dataset_format pt|lerobot` selects legacy per-episode PyTorch files or a directly
-  loadable LeRobot v3 dataset. The default remains `pt`.
-- `--num_episodes N` sets the number of completed trajectories to save. The default is 10.
-- `--dataset_dir PATH` sets the output directory. The default is
-  `datasets/goal_navigation`.
-- `--num_envs N` controls parallel environments. The default is 1 to prevent neighboring
-  environments from appearing in the camera images.
-- `--checkpoint PATH` selects the trained locomotion checkpoint.
-- `--headless` disables the interactive viewer. Omit it to watch the robot-following viewer.
+- `--collect_data` enables dataset recording. Without it, the script only runs
+  the environment.
+- `--dataset_format pt|lerobot` selects per-episode PyTorch files or a LeRobot
+  v3 dataset. The default is `pt`.
+- `--num_episodes N` controls the number of completed trajectories to save.
+- `--dataset_dir PATH` sets the output directory.
+- `--num_envs N` controls the number of parallel environments. Keep it at `1`
+  for camera collection so neighboring environments do not appear in images.
+- `--headless` disables the viewer. Omit it to watch collection.
+- `--push_to_hub` uploads a finalized LeRobot dataset. Authenticate first with
+  `hf auth login`.
 
-Camera rendering is enabled automatically by the collection script. Each episode is saved
-immediately as a separate file:
+Camera rendering is enabled automatically.
+
+### PyTorch dataset format
+
+Each completed episode is saved immediately:
 
 ```text
 datasets/goal_navigation/
@@ -146,7 +149,7 @@ datasets/goal_navigation/
 └── ...
 ```
 
-Load a trajectory with:
+Load an episode with:
 
 ```python
 import torch
@@ -158,19 +161,34 @@ joint_actions = trajectory["action"]
 velocity_commands = trajectory["velocity_command"]
 ```
 
-`action` contains the low-level locomotion policy output, while `velocity_command` contains
-the scripted `[vx, vy, wz]` target suitable as supervision for a future local navigation
-module.
+`action` is the low-level locomotion output. `velocity_command` is the scripted
+`[vx, vy, wz]` target used as supervision for the high-level navigation policy.
 
-### Record directly in LeRobot v3 format
+## 3. Collect LeRobot data and train PI0.5
 
-Install the vendored LeRobot checkout in the same Python environment as Isaac Lab:
+Quadloco includes a patched LeRobot `0.4.4` checkout under
+`third_party/lerobot`; no separate LeRobot clone is required.
+
+### Install LeRobot and download PI0.5
+
+Run the setup script once from the Quadloco root:
 
 ```bash
-pip install -e "./third_party/lerobot[pi]"
+bash scripts/setup_vendored_lerobot.sh
 ```
 
-Then record into a new output directory:
+The script:
+
+1. installs the vendored LeRobot checkout in editable mode; and
+2. downloads the compatible PI0.5 checkpoint revision to
+   `checkpoints/pi05_base_lerobot_0.4.4`.
+
+The model download is approximately 14.5 GB. The `checkpoints` directory is
+ignored by Git.
+
+### Record a LeRobot v3 dataset
+
+The output directory must not already exist:
 
 ```bash
 python scripts/quadloco_rsl_rl/run_data_collection.py \
@@ -185,85 +203,56 @@ python scripts/quadloco_rsl_rl/run_data_collection.py \
     --headless
 ```
 
-The output directory must not already exist. LeRobot writes RGB frames as MP4 video and
-state, action, episode, task, and statistics metadata as Parquet/JSON files. The top-level
-`action` is the navigation command `[vx, vy, wz]`, and `observation.state` is the measured
-base velocity `[vx, vy, wz]`. The full locomotion-policy observation and 12-dimensional
-joint-policy output are retained as `observation.policy_state` and
-`observation.low_level_action`.
-Metric depth is omitted by default because storing full-resolution float32 depth in
-Parquet is large; add `--lerobot_include_depth` when it is required.
+LeRobot stores RGB frames as MP4 video and the remaining data and metadata as
+Parquet/JSON files. Dataset fields include:
 
-Add `--push_to_hub` to upload the finalized dataset using `--dataset_repo_id`. Authentication
-must already be configured with `hf auth login`.
+- `action`: high-level navigation command `[vx, vy, wz]`;
+- `observation.state`: measured base velocity `[vx, vy, wz]`;
+- `observation.policy_state`: full locomotion-policy observation; and
+- `observation.low_level_action`: 12-dimensional joint-policy output.
 
-## PI0.5 Training with LeRobot 0.4.4
+Metric depth is omitted by default because full-resolution float32 depth is
+large. Add `--lerobot_include_depth` when depth is required. Add
+`--push_to_hub` to upload the finalized dataset using `--dataset_repo_id`.
 
-This repository includes a patched copy of LeRobot `0.4.4` under
-`third_party/lerobot`. It is committed as ordinary Quadloco source and does not require a
-separate LeRobot clone.
+### Train the high-level velocity policy
 
-Do not load
-`lerobot/pi05_base` from its unpinned `main` revision: its processor configuration was
-updated after LeRobot 0.4.4 and now references `relative_actions_processor`, which 0.4.4
-does not provide.
-
-### Fresh installation
-
-After cloning Quadloco, activate the Isaac Lab environment and run the included setup
-script:
+Set the dataset, output, and Hugging Face repository values at the top of
+`train_pi05_velocity.sh`, or override them with environment variables. Then run:
 
 ```bash
-conda activate env_isaaclab
-cd /path/to/quadloco
-bash scripts/setup_vendored_lerobot.sh
+bash train_pi05_velocity.sh
 ```
 
-This installs `third_party/lerobot` in editable mode and downloads the compatible PI0.5
-revision `a538eb273274eb30f126a118f39dbc0ee212c883` into
-`checkpoints/pi05_base_lerobot_0.4.4`. The `checkpoints` directory is ignored by Git so the
-14.5 GB model is not accidentally committed.
+The script converts the collected dataset to the three-dimensional
+`[vx, vy, wz]` training target when necessary, then starts PI0.5 training.
 
-### LeRobot 0.4.4 checkpoint-loader compatibility patch
+For a two-step, 12-dimensional joint-action smoke test, run:
 
-The converted PI0.5 checkpoint stores PaliGemma's tied token embedding under
-`lm_head.weight`, while the LeRobot 0.4.4 model also expects
-`model.language_model.embed_tokens.weight`. Without the following alias, the loader catches
-a strict-loading exception and may continue without completing the pretrained load.
-The targeted compatibility mapping is already applied in the vendored
-`third_party/lerobot/src/lerobot/policies/pi05/modeling_pi05.py`. No manual patch is needed.
-Strict checkpoint loading remains enabled so unrelated missing or unexpected weights are
-not hidden.
+```bash
+bash train_vla_lerobot.sh
+```
 
-Confirm that Python imports the patched editable checkout:
+## PI0.5 compatibility notes
+
+Use the checkpoint downloaded by `scripts/setup_vendored_lerobot.sh`. Do not use
+the unpinned `main` revision of `lerobot/pi05_base`: its processor configuration
+is newer than LeRobot `0.4.4`.
+
+The vendored checkout also contains a checkpoint-loader compatibility mapping
+for PaliGemma's tied token embeddings. No manual patch is required, and strict
+checkpoint loading remains enabled.
+
+Confirm that Python imports the vendored checkout:
 
 ```bash
 python -c \
     "import lerobot.policies.pi05.modeling_pi05 as m; print(m.__file__)"
 ```
 
-The printed path should point inside `/path/to/quadloco/third_party/lerobot`, not
-`site-packages`.
-
-### Run training
-
-For the 12-dimensional joint-action smoke test:
-
-```bash
-cd /path/to/quadloco
-bash train_vla_lerobot.sh
-```
-
-For the three-dimensional high-level `[vx, vy, wz]` policy:
-
-```bash
-cd /path/to/quadloco
-bash train_pi05_velocity.sh
-```
-
-The expected startup log should show the local checkpoint directory. If it shows
-`lerobot/pi05_base`, the unpinned Hub revision is still being used. A successful strict
-load should not end with:
+The path should point to `quadloco/third_party/lerobot`, not `site-packages`.
+During training, the startup log should show the local checkpoint directory
+rather than `lerobot/pi05_base`, and it should not end with:
 
 ```text
 Warning: Could not remap state dict keys
