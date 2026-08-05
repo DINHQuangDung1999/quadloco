@@ -65,19 +65,31 @@ parser.add_argument(
     help="LeRobot dataset identifier stored in metadata and used when pushing to Hugging Face.",
 )
 parser.add_argument(
-    "--dataset_task",
-    type=str,
-    default="Navigate to the target",
-    help="Natural-language task attached to every recorded LeRobot frame.",
-)
-parser.add_argument(
     "--lerobot_include_depth",
     action=argparse.BooleanOptionalAction,
     default=True,
     help=(
-        "Store metric depth as float32 arrays in Parquet (enabled by default). "
+        "Store resized depth as D435i-style Z16 uint16 arrays in Parquet (enabled by default). "
         "Use --no-lerobot_include_depth to omit it and reduce dataset size."
     ),
+)
+parser.add_argument(
+    "--depth_width",
+    type=int,
+    default=128,
+    help="Width of the stored depth image. The source is center-cropped if needed to preserve aspect ratio.",
+)
+parser.add_argument(
+    "--depth_height",
+    type=int,
+    default=96,
+    help="Height of the stored depth image. The source is center-cropped if needed to preserve aspect ratio.",
+)
+parser.add_argument(
+    "--depth_scale",
+    type=float,
+    default=0.001,
+    help="Canonical Z16 depth scale in metres per integer unit.",
 )
 parser.add_argument(
     "--push_to_hub",
@@ -170,10 +182,56 @@ def _rgb_frame(tensor: torch.Tensor) -> np.ndarray:
     return np.ascontiguousarray(frame)
 
 
-def _depth_frame(tensor: torch.Tensor) -> np.ndarray:
-    """Convert metric depth to finite float32 values for Parquet storage."""
-    frame = _cpu_numpy(tensor, np.float32)
-    return np.ascontiguousarray(np.nan_to_num(frame, nan=0.0, posinf=0.0, neginf=0.0))
+def _depth_frame(
+    tensor: torch.Tensor,
+    output_size: tuple[int, int],
+    depth_scale: float,
+) -> np.ndarray:
+    """Center-crop, resize, and encode metric depth as a Z16 uint16 image."""
+    output_height, output_width = output_size
+    if output_height <= 0 or output_width <= 0:
+        raise ValueError(f"Depth output dimensions must be positive, got {output_size}.")
+    if depth_scale <= 0:
+        raise ValueError(f"Depth scale must be positive, got {depth_scale}.")
+
+    depth = tensor.detach()
+    has_channel = depth.ndim == 3 and depth.shape[-1] == 1
+    if has_channel:
+        depth = depth[..., 0]
+    if depth.ndim != 2:
+        raise ValueError(f"Expected depth with shape (H, W) or (H, W, 1), got {tuple(tensor.shape)}")
+
+    # Preserve geometry when source and target aspect ratios differ. For
+    # example, 640x480 -> 128x96 needs no crop, while 640x480 -> 128x128
+    # receives a centered 480x480 crop before resizing.
+    source_height, source_width = depth.shape
+    source_aspect = source_width / source_height
+    target_aspect = output_width / output_height
+    if not np.isclose(source_aspect, target_aspect):
+        if source_aspect > target_aspect:
+            crop_width = max(1, round(source_height * target_aspect))
+            left = (source_width - crop_width) // 2
+            depth = depth[:, left : left + crop_width]
+        else:
+            crop_height = max(1, round(source_width / target_aspect))
+            top = (source_height - crop_height) // 2
+            depth = depth[top : top + crop_height, :]
+
+    depth = torch.nn.functional.interpolate(
+        depth[None, None].float(),
+        size=(output_height, output_width),
+        mode="nearest",
+    )[0, 0]
+
+    # Match RealSense Z16 semantics: positive finite values are quantized
+    # using the configured scale, and zero denotes invalid/missing depth.
+    valid = torch.isfinite(depth) & (depth > 0)
+    depth_z16 = torch.where(valid, torch.round(depth / depth_scale), 0.0)
+    depth_z16 = torch.clamp(depth_z16, 0, np.iinfo(np.uint16).max)
+    frame = _cpu_numpy(depth_z16, np.uint16)
+    if has_channel:
+        frame = frame[..., None]
+    return np.ascontiguousarray(frame)
 
 
 def _create_lerobot_dataset(
@@ -181,11 +239,12 @@ def _create_lerobot_dataset(
     repo_id: str,
     fps: int,
     rgb: torch.Tensor,
-    base_velocity: torch.Tensor,
     policy_observation: torch.Tensor,
     low_level_action: torch.Tensor,
     velocity_command: torch.Tensor,
     depth: torch.Tensor | None,
+    depth_output_size: tuple[int, int],
+    depth_scale: float,
 ):
     """Create a LeRobot v3 dataset using shapes observed from the environment."""
     try:
@@ -204,7 +263,6 @@ def _create_lerobot_dataset(
         )
 
     rgb_sample = _rgb_frame(rgb)
-    state_sample = _cpu_numpy(base_velocity, np.float32)
     policy_state_sample = _cpu_numpy(policy_observation, np.float32)
     low_level_action_sample = _cpu_numpy(low_level_action, np.float32)
     command_sample = _cpu_numpy(velocity_command, np.float32)
@@ -217,19 +275,21 @@ def _create_lerobot_dataset(
         },
         "observation.state": {
             "dtype": "float32",
-            "shape": state_sample.shape,
-            "names": ["vx", "vy", "wz"] if state_sample.shape == (3,) else None,
+            "shape": policy_state_sample.shape,
+            "names": None,
         },
         "action": {
             "dtype": "float32",
             "shape": low_level_action_sample.shape,
             "names": None,
         },
-        "observation.policy_state": {
-            "dtype": "float32",
-            "shape": policy_state_sample.shape,
-            "names": None,
-        },
+        # Keep body linear velocity available for future experiments, but do not
+        # store it until it is explicitly needed by the VLA.
+        # "observation.body_linear_velocity": {
+        #     "dtype": "float32",
+        #     "shape": (3,),
+        #     "names": ["vx", "vy", "vz"],
+        # },
         "observation.velocity_command": {
             "dtype": "float32",
             "shape": command_sample.shape,
@@ -237,11 +297,16 @@ def _create_lerobot_dataset(
         },
     }
     if depth is not None:
-        depth_sample = _depth_frame(depth)
+        depth_sample = _depth_frame(depth, depth_output_size, depth_scale)
         features["observation.depth.camera1"] = {
-            "dtype": "float32",
+            "dtype": "uint16",
             "shape": depth_sample.shape,
             "names": None,
+        }
+        features["observation.depth_scale"] = {
+            "dtype": "float32",
+            "shape": (1,),
+            "names": ["metres_per_unit"],
         }
 
     return LeRobotDataset.create(
@@ -393,11 +458,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             if collect_data:
                 camera_obs = obs["camera"]
-                velocity_commands = env.unwrapped.command_manager.get_command("base_velocity")
+                command_term = env.unwrapped.command_manager.get_term("base_velocity")
+                velocity_commands = command_term.command
+                if not hasattr(command_term, "goal_task_names"):
+                    raise AttributeError(
+                        "The base_velocity command must provide goal_task_names "
+                        "for LeRobot data collection."
+                    )
+                frame_task = command_term.goal_task_names[0]
                 robot_data = env.unwrapped.scene["robot"].data
-                base_velocities = torch.cat(
-                    (robot_data.root_lin_vel_b[:, :2], robot_data.root_ang_vel_b[:, 2:3]), dim=-1
-                )
+                # Body linear velocity can be recorded separately later if needed:
+                # body_linear_velocities = robot_data.root_lin_vel_b
                 if args_cli.dataset_format == "lerobot":
                     if lerobot_dataset is None:
                         fps = round(1.0 / dt)
@@ -406,26 +477,38 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             repo_id=args_cli.dataset_repo_id,
                             fps=fps,
                             rgb=camera_obs["rgb"][0],
-                            base_velocity=base_velocities[0],
                             policy_observation=obs["policy"][0],
                             low_level_action=applied_actions[0],
                             velocity_command=velocity_commands[0],
                             depth=camera_obs["depth"][0] if args_cli.lerobot_include_depth else None,
+                            depth_output_size=(args_cli.depth_height, args_cli.depth_width),
+                            depth_scale=args_cli.depth_scale,
                         )
                         print(f"[INFO] Initialized LeRobot v3 dataset at: {lerobot_dataset.root}")
 
                     frame = {
                         "observation.images.camera1": _rgb_frame(camera_obs["rgb"][0]),
-                        "observation.state": _cpu_numpy(base_velocities[0], np.float32),
-                        "observation.policy_state": _cpu_numpy(obs["policy"][0], np.float32),
+                        "observation.state": _cpu_numpy(obs["policy"][0], np.float32),
+                        # Retain the clearly named body-velocity field here for
+                        # easy re-enablement in future datasets.
+                        # "observation.body_linear_velocity": _cpu_numpy(
+                        #     robot_data.root_lin_vel_b[0], np.float32
+                        # ),
                         "observation.velocity_command": _cpu_numpy(
                             velocity_commands[0], np.float32
                         ),
                         "action": _cpu_numpy(applied_actions[0], np.float32),
-                        "task": args_cli.dataset_task,
+                        "task": frame_task,
                     }
                     if args_cli.lerobot_include_depth:
-                        frame["observation.depth.camera1"] = _depth_frame(camera_obs["depth"][0])
+                        frame["observation.depth.camera1"] = _depth_frame(
+                            camera_obs["depth"][0],
+                            (args_cli.depth_height, args_cli.depth_width),
+                            args_cli.depth_scale,
+                        )
+                        frame["observation.depth_scale"] = np.asarray(
+                            [args_cli.depth_scale], dtype=np.float32
+                        )
                     lerobot_dataset.add_frame(frame)
                 else:
                     for env_id in range(num_envs):

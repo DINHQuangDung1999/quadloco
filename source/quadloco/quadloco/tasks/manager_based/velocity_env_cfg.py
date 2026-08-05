@@ -336,7 +336,7 @@ class RewardsCfg:
         func=mdp.base_height_l2, 
         weight=-1.0,
         params={
-            "target_height": 0.4,
+            "target_height": 0.35,
             "asset_cfg": SceneEntityCfg("robot"),
             "sensor_cfg": SceneEntityCfg("height_scanner"),
         })
@@ -352,7 +352,12 @@ class RewardsCfg:
     flat_orientation_l2 = RewTerm(
         func=mdp.flat_orientation_l2, 
         weight=-0.2)
-
+    
+    hip_deviation = RewTerm(
+        func=mdp.joint_deviation_l1,
+        weight=-0.4,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_joint"])},
+    )
 
 @configclass
 class TerminationsCfg:
@@ -369,7 +374,7 @@ class TerminationsCfg:
     # )
     bad_orientation = DoneTerm(
         func=mdp.bad_orientation,
-        params={"limit_angle": 1.0},
+        params={"limit_angle": math.pi/2},
     )
 @configclass
 class CurriculumCfg:

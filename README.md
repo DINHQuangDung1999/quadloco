@@ -179,7 +179,6 @@ python scripts/quadloco_rsl_rl/run_data_collection.py \
     --collect_data \
     --dataset_format lerobot \
     --dataset_repo_id YOUR_HF_USERNAME/quadloco-goal-navigation \
-    --dataset_task "Navigate to the target" \
     --dataset_dir datasets/quadloco_lerobot_v1 \
     --num_episodes 10 \
     --num_envs 1 \

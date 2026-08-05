@@ -1,6 +1,6 @@
 import isaaclab.sim as sim_utils
 from isaaclab.envs import ViewerCfg
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
@@ -98,19 +98,42 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
             asset_name="robot",
             resampling_time_range=(20.0, 20.0),
             debug_vis=True,
-            goal_tolerance=0.5,
-            slowdown_distance=1.0,
+            goal_tolerance=1.0,
+            slowdown_distance=1.5,
             forward_velocity=1.0,
             yaw_gain=1.5,
             max_yaw_rate=0.8,
             marker_height=0.4,
             marker_shapes=("pyramid", "cube", "sphere"),
             marker_colors=("red", "green", "blue"),
+            task_template="Navigate to the {color} {shape}",
+            candidate_y_offsets=(-1.0, 0.0, 1.0),
+            candidate_x_error=0.5,
+            candidate_y_spacing_error=0.5,
             ranges=mdp.UniformGoalVelocityCommandCfg.Ranges(
                 pos_x=(5.0, 5.0),
                 pos_y=(-4.0, 4.0),
             ),
         )
+
+        # Spawn every shape/color variant as a real, non-colliding kinematic
+        # scene object. The command term moves the three selected variants into
+        # view and parks the unused variants below the stage on every reset.
+        command_cfg = self.commands.base_velocity
+        for shape in command_cfg.marker_shapes:
+            for color in command_cfg.marker_colors:
+                asset_name = f"{command_cfg.candidate_asset_prefix}_{shape}_{color}"
+                setattr(
+                    self.scene,
+                    asset_name,
+                    RigidObjectCfg(
+                        prim_path=f"{{ENV_REGEX_NS}}/GoalObject_{shape}_{color}",
+                        init_state=RigidObjectCfg.InitialStateCfg(
+                            pos=(0.0, 0.0, command_cfg.unused_candidate_height),
+                        ),
+                        spawn=mdp.make_goal_object_spawn_cfg(shape, color),
+                    ),
+                )
 
         # Alternative three-object navigation setting (uncomment to enable):
         #
@@ -135,16 +158,43 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
             params={"command_name": "base_velocity", "duration_s": 0.2},
         )
 
-        self.scene.kitchen = AssetBaseCfg(
-            prim_path="{ENV_REGEX_NS}/Kitchen",
-            init_state=AssetBaseCfg.InitialStateCfg(
-                pos=(0.0, 0.0, 0.0),
-            ),
-            spawn=sim_utils.UsdFileCfg(
-                usd_path="/home/dung-admin/quadloco_ws/assets/kitchen/kitchen.usdc",
-                collision_props=sim_utils.CollisionPropertiesCfg(
-                    collision_enabled=True,
-                ),
-            ),
-        )
-        self.scene.terrain = None
+        # # Keep /World/ground for the pretrained policy's height scanner, but
+        # # replace the inherited generated rough terrain with a flat support
+        # # plane so it does not visually occlude the RATLab USD.
+        # self.scene.terrain.terrain_type = "plane"
+        # self.scene.terrain.terrain_generator = None
+        # self.curriculum.terrain_levels = None
+
+        # self.scene.ratlab = AssetBaseCfg(
+        #     prim_path="/World/RATLab",
+        #     init_state=AssetBaseCfg.InitialStateCfg(
+        #         pos=(0.0, 0.0, 0.0),
+        #     ),
+        #     spawn=sim_utils.UsdFileCfg(
+        #         usd_path=(
+        #             "/home/summerschool/summerschool_ws/"
+        #             "assets/rat_lab/multicorridor/empty_lab.usd"
+        #         ),
+        #         collision_props=sim_utils.CollisionPropertiesCfg(
+        #             collision_enabled=True,
+        #         ),
+        #     ),
+        # )
+
+        # self.scene.kitchen = AssetBaseCfg(
+        #     prim_path="/World/Kitchen",
+        #     init_state=AssetBaseCfg.InitialStateCfg(
+        #         pos=(0.0, 0.0, 0.0),
+        #     ),
+        #     spawn=sim_utils.UsdFileCfg(
+        #         usd_path=(
+        #             "/home/summerschool/summerschool_ws/"
+        #             "assets/kitchen/kitchen.usdc"
+        #         ),
+        #         collision_props=sim_utils.CollisionPropertiesCfg(
+        #             collision_enabled=True,
+        #         ),
+        #     ),
+        # )
+
+        # self.scene.terrain = None

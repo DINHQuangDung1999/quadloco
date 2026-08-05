@@ -76,3 +76,33 @@ gym.register(
         "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
     },
 )
+
+gym.register(
+    id="Unitree-Go2-Quadloco-ManagerBased-Vision-Rough-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            "quadloco.tasks.manager_based.vision_velocity_env_cfg:"
+            "VisionLocomotionVelocityRoughEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.vision_rsl_rl_ppo_cfg:UnitreeGo2VisionPPORunnerCfg"
+        ),
+    },
+)
+
+gym.register(
+    id="Unitree-Go2-Quadloco-ManagerBased-Vision-Rough-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            "quadloco.tasks.manager_based.vision_velocity_env_cfg:"
+            "VisionLocomotionVelocityRoughEnvCfg_PLAY"
+        ),
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.vision_rsl_rl_ppo_cfg:UnitreeGo2VisionPPORunnerCfg"
+        ),
+    },
+)

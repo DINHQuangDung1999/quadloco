@@ -24,9 +24,9 @@ class UnitreeGo2RoughEnvCfg_PLAY(UnitreeGo2RoughEnvCfg):
     def __post_init__(self):
         # post init of parent
         super().__post_init__()
-        # self.commands.base_velocity.ranges.lin_vel_x = (0.0,0.7)
-        # self.commands.base_velocity.ranges.lin_vel_y = (0.0,0.0)
-        # self.commands.base_velocity.ranges.ang_vel_z = (0.0,0.0)
+        self.commands.base_velocity.ranges.lin_vel_x = (1.0,1.0)
+        self.commands.base_velocity.ranges.lin_vel_y = (0.0,0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (0.0,0.0)
         # make a smaller scene for play
         self.scene.num_envs = 50
         self.scene.env_spacing = 2.5
@@ -67,14 +67,14 @@ class UnitreeGo2RoughNavEnvCfg_PLAY(GoalNavigationEnvCfg):
         # make a smaller scene for play
         self.scene.num_envs = 50
         self.scene.env_spacing = 2.5
-        # spawn the robot randomly in the grid (instead of their terrain levels)
-        self.scene.terrain.max_init_terrain_level = None
-        # reduce the number of terrains to save memory
-        if self.scene.terrain.terrain_generator is not None:
-            self.scene.terrain.terrain_generator.num_rows = 5
-            self.scene.terrain.terrain_generator.num_cols = 5
-            self.scene.terrain.terrain_generator.curriculum = False
-        self.scene.terrain.terrain_generator.sub_terrains["random_rough"].proportion = 0.0
-        self.scene.terrain.terrain_generator.sub_terrains["flat"].proportion = 1.0
+        # # spawn the robot randomly in the grid (instead of their terrain levels)
+        # self.scene.terrain.max_init_terrain_level = None
+        # # reduce the number of terrains to save memory
+        # if self.scene.terrain.terrain_generator is not None:
+        #     self.scene.terrain.terrain_generator.num_rows = 5
+        #     self.scene.terrain.terrain_generator.num_cols = 5
+        #     self.scene.terrain.terrain_generator.curriculum = False
+        # self.scene.terrain.terrain_generator.sub_terrains["random_rough"].proportion = 0.0
+        # self.scene.terrain.terrain_generator.sub_terrains["flat"].proportion = 1.0
         # disable randomization for play
         self.observations.policy.enable_corruption = False

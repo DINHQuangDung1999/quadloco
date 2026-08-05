@@ -40,8 +40,8 @@ cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
-# always enable cameras to record video
-if args_cli.video:
+# Vision tasks require camera rendering even when video recording is disabled.
+if args_cli.video or (args_cli.task is not None and "Vision" in args_cli.task):
     args_cli.enable_cameras = True
 
 # clear out sys.argv for Hydra
@@ -72,6 +72,11 @@ if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
         f"\n\n\t{' '.join(cmd)}\n"
     )
     exit(1)
+if args_cli.task is not None and "Vision" in args_cli.task and version.parse(installed_version) >= version.parse("4.0.0"):
+    raise RuntimeError(
+        "The vendored ActorCriticDepthCNN uses the RSL-RL 3.x policy API. "
+        f"Found rsl-rl-lib {installed_version}; install a compatible 3.x release."
+    )
 
 """Rest everything follows."""
 
@@ -83,6 +88,11 @@ from datetime import datetime
 import gymnasium as gym
 import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+
+if args_cli.task is not None and "Vision" in args_cli.task:
+    from modules import register_vision_modules
+
+    register_vision_modules()
 
 from isaaclab.envs import (
     DirectMARLEnv,
