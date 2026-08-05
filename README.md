@@ -164,10 +164,10 @@ module.
 
 ### Record directly in LeRobot v3 format
 
-Install the sibling LeRobot checkout in the same Python environment as Isaac Lab:
+Install the vendored LeRobot checkout in the same Python environment as Isaac Lab:
 
 ```bash
-pip install -e ../lerobot
+pip install -e "./third_party/lerobot[pi]"
 ```
 
 Then record into a new output directory:
@@ -196,3 +196,75 @@ Parquet is large; add `--lerobot_include_depth` when it is required.
 
 Add `--push_to_hub` to upload the finalized dataset using `--dataset_repo_id`. Authentication
 must already be configured with `hf auth login`.
+
+## PI0.5 Training with LeRobot 0.4.4
+
+This repository includes a patched copy of LeRobot `0.4.4` under
+`third_party/lerobot`. It is committed as ordinary Quadloco source and does not require a
+separate LeRobot clone.
+
+Do not load
+`lerobot/pi05_base` from its unpinned `main` revision: its processor configuration was
+updated after LeRobot 0.4.4 and now references `relative_actions_processor`, which 0.4.4
+does not provide.
+
+### Fresh installation
+
+After cloning Quadloco, activate the Isaac Lab environment and run the included setup
+script:
+
+```bash
+conda activate env_isaaclab
+cd /path/to/quadloco
+bash scripts/setup_vendored_lerobot.sh
+```
+
+This installs `third_party/lerobot` in editable mode and downloads the compatible PI0.5
+revision `a538eb273274eb30f126a118f39dbc0ee212c883` into
+`checkpoints/pi05_base_lerobot_0.4.4`. The `checkpoints` directory is ignored by Git so the
+14.5 GB model is not accidentally committed.
+
+### LeRobot 0.4.4 checkpoint-loader compatibility patch
+
+The converted PI0.5 checkpoint stores PaliGemma's tied token embedding under
+`lm_head.weight`, while the LeRobot 0.4.4 model also expects
+`model.language_model.embed_tokens.weight`. Without the following alias, the loader catches
+a strict-loading exception and may continue without completing the pretrained load.
+The targeted compatibility mapping is already applied in the vendored
+`third_party/lerobot/src/lerobot/policies/pi05/modeling_pi05.py`. No manual patch is needed.
+Strict checkpoint loading remains enabled so unrelated missing or unexpected weights are
+not hidden.
+
+Confirm that Python imports the patched editable checkout:
+
+```bash
+python -c \
+    "import lerobot.policies.pi05.modeling_pi05 as m; print(m.__file__)"
+```
+
+The printed path should point inside `/path/to/quadloco/third_party/lerobot`, not
+`site-packages`.
+
+### Run training
+
+For the 12-dimensional joint-action smoke test:
+
+```bash
+cd /path/to/quadloco
+bash train_vla_lerobot.sh
+```
+
+For the three-dimensional high-level `[vx, vy, wz]` policy:
+
+```bash
+cd /path/to/quadloco
+bash train_pi05_velocity.sh
+```
+
+The expected startup log should show the local checkpoint directory. If it shows
+`lerobot/pi05_base`, the unpinned Hub revision is still being used. A successful strict
+load should not end with:
+
+```text
+Warning: Could not remap state dict keys
+```

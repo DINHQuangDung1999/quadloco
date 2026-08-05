@@ -10,8 +10,10 @@ from pathlib import Path
 
 import numpy as np
 
-from lerobot.datasets.dataset_tools import modify_features, recompute_stats
+from lerobot.datasets.compute_stats import get_feature_stats
+from lerobot.datasets.dataset_tools import modify_features
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.utils import write_stats
 
 
 ACTION_KEY = "action"
@@ -113,7 +115,17 @@ def main() -> None:
             output_dir=output_root,
             repo_id=args.output_repo_id,
         )
-        recompute_stats(derived, skip_image_video=True)
+        # LeRobot 0.4.4 does not provide dataset_tools.recompute_stats().
+        # modify_features preserves the statistics of retained features, so
+        # calculate only the two features introduced by this conversion.
+        derived_stats = dict(derived.meta.stats or {})
+        derived_stats[ACTION_KEY] = get_feature_stats(
+            velocity_matrix, axis=0, keepdims=False
+        )
+        derived_stats[STATE_KEY] = get_feature_stats(
+            dummy_states, axis=0, keepdims=False
+        )
+        write_stats(derived_stats, output_root)
     except Exception:
         if output_root.exists():
             shutil.rmtree(output_root)

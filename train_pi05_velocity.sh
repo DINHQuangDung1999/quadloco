@@ -2,12 +2,13 @@
 set -euo pipefail
 
 QUADLOCO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LEROBOT_ENV="${LEROBOT_ENV:-/home/summerschool/miniconda3/envs/env_lerobot}"
+LEROBOT_ROOT="${LEROBOT_ROOT:-${QUADLOCO_ROOT}/third_party/lerobot}"
+LEROBOT_PYTHON="${LEROBOT_PYTHON:-$(command -v python)}"
 SOURCE_DATASET_ROOT="${SOURCE_DATASET_ROOT:-/home/summerschool/summerschool_ws/Dataset/quadloco-vla-lerobot_no_depth}"
 SOURCE_DATASET_REPO="${SOURCE_DATASET_REPO:-DinhQuangDung/quadloco-object-navigation}"
 TRAIN_DATASET_ROOT="${TRAIN_DATASET_ROOT:-/home/summerschool/summerschool_ws/Dataset/quadloco-vla-velocity-pi05}"
 TRAIN_DATASET_REPO="${TRAIN_DATASET_REPO:-DinhQuangDung/quadloco-object-navigation-velocity}"
-BASE_MODEL="${BASE_MODEL:-lerobot/pi05_base}"
+BASE_MODEL="${BASE_MODEL:-${QUADLOCO_ROOT}/checkpoints/pi05_base_lerobot_0.4.4}"
 MODEL_REPO="${MODEL_REPO:-DinhQuangDung/pi05-quadloco-velocity}"
 OUTPUT_DIR="${OUTPUT_DIR:-/home/summerschool/summerschool_ws/quadloco/outputs/pi05_quadloco_velocity}"
 
@@ -19,13 +20,19 @@ TRAIN_EXPERT_ONLY="${TRAIN_EXPERT_ONLY:-true}"
 PUSH_MODEL_TO_HUB="${PUSH_MODEL_TO_HUB:-false}"
 WANDB_ENABLE="${WANDB_ENABLE:-false}"
 
-if [[ ! -x "${LEROBOT_ENV}/bin/lerobot-train" ]]; then
-    echo "LeRobot training executable not found: ${LEROBOT_ENV}/bin/lerobot-train" >&2
+if [[ ! -x "${LEROBOT_PYTHON}" ]]; then
+    echo "Python executable not found: ${LEROBOT_PYTHON}" >&2
+    exit 1
+fi
+
+if [[ ! -f "${LEROBOT_ROOT}/src/lerobot/scripts/lerobot_train.py" ]]; then
+    echo "Vendored LeRobot training script not found: ${LEROBOT_ROOT}" >&2
     exit 1
 fi
 
 if [[ ! -d "${TRAIN_DATASET_ROOT}/meta" ]]; then
-    "${LEROBOT_ENV}/bin/python" \
+    PYTHONPATH="${LEROBOT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${LEROBOT_PYTHON}" \
         "${QUADLOCO_ROOT}/scripts/prepare_pi05_velocity_dataset.py" \
         --source-root "${SOURCE_DATASET_ROOT}" \
         --source-repo-id "${SOURCE_DATASET_REPO}" \
@@ -39,7 +46,8 @@ if [[ -e "${OUTPUT_DIR}" ]]; then
     exit 1
 fi
 
-exec "${LEROBOT_ENV}/bin/lerobot-train" \
+export PYTHONPATH="${LEROBOT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+exec "${LEROBOT_PYTHON}" "${LEROBOT_ROOT}/src/lerobot/scripts/lerobot_train.py" \
     --dataset.repo_id="${TRAIN_DATASET_REPO}" \
     --dataset.root="${TRAIN_DATASET_ROOT}" \
     --policy.type=pi05 \
@@ -61,5 +69,5 @@ exec "${LEROBOT_ENV}/bin/lerobot-train" \
     --num_workers="${NUM_WORKERS}" \
     --log_freq=10 \
     --save_freq="${SAVE_FREQ}" \
-    --env_eval_freq=0 \
+    --eval_freq=0 \
     --wandb.enable="${WANDB_ENABLE}"
