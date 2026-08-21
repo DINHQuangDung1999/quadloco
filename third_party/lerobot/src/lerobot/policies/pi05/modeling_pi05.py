@@ -42,6 +42,11 @@ else:
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.pi05.configuration_pi05 import DEFAULT_IMAGE_SIZE, PI05Config
+from lerobot.policies.pi05.depth_encoder import (
+    PI05DepthCrossAttention,
+    PI05DepthEncoder,
+    PI05DepthEncoderConfig,
+)
 from lerobot.policies.pretrained import PreTrainedPolicy, T
 from lerobot.policies.rtc.modeling_rtc import RTCProcessor
 from lerobot.utils.constants import (
@@ -213,6 +218,33 @@ def resize_with_pad_torch(  # see openpi `resize_with_pad_torch` (exact copy)
         padded_images = padded_images.permute(0, 2, 3, 1)  # [b, c, h, w] -> [b, h, w, c]
 
     return padded_images
+
+
+def resize_depth_with_pad_torch(
+    depth: torch.Tensor,
+    height: int,
+    width: int,
+) -> torch.Tensor:
+    """Nearest-neighbor letterbox metric BCHW depth using invalid zero padding."""
+    if depth.ndim != 4 or depth.shape[1] != 1:
+        raise ValueError(f"Expected depth as [B,1,H,W], received {tuple(depth.shape)}")
+
+    cur_height, cur_width = depth.shape[-2:]
+    ratio = max(cur_width / width, cur_height / height)
+    resized_height = int(cur_height / ratio)
+    resized_width = int(cur_width / ratio)
+    resized_depth = F.interpolate(depth, size=(resized_height, resized_width), mode="nearest")
+
+    pad_h0, remainder_h = divmod(height - resized_height, 2)
+    pad_h1 = pad_h0 + remainder_h
+    pad_w0, remainder_w = divmod(width - resized_width, 2)
+    pad_w1 = pad_w0 + remainder_w
+    return F.pad(
+        resized_depth,
+        (pad_w0, pad_w1, pad_h0, pad_h1),
+        mode="constant",
+        value=0.0,
+    )
 
 
 # Define the complete layer computation function for gradient checkpointing
@@ -563,6 +595,28 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
         self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
+        self.depth_encoder = None
+        self.depth_cross_attention = None
+        self._last_depth_fusion_metrics = {}
+        if config.depth_enabled:
+            self.depth_encoder = PI05DepthEncoder(
+                output_dim=paligemma_config.width,
+                config=PI05DepthEncoderConfig(
+                    depths=config.depth_stage_depths,
+                    dims=config.depth_stage_dims,
+                    patch_size=config.depth_patch_size,
+                    output_grid_size=config.depth_token_grid,
+                    min_depth=config.depth_min,
+                    max_depth=config.depth_max,
+                    drop_path_rate=config.depth_drop_path_rate,
+                ),
+            )
+            if config.depth_fusion_mode == "cross_attention":
+                self.depth_cross_attention = PI05DepthCrossAttention(
+                    embed_dim=paligemma_config.width,
+                    num_heads=config.depth_cross_attention_heads,
+                )
+
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
 
@@ -632,7 +686,13 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         return time.to(dtype=torch.float32, device=device)
 
     def embed_prefix(
-        self, images, img_masks, tokens, masks
+        self,
+        images,
+        img_masks,
+        tokens,
+        masks,
+        depth=None,
+        depth_mask=None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Embed images with SigLIP and language tokens with embedding layer."""
         embs = []
@@ -651,6 +711,96 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             embs.append(img_emb)
             pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
             att_masks += [0] * num_img_embs
+
+        if self.depth_encoder is not None:
+            if depth is None or depth_mask is None:
+                raise ValueError("Depth-enabled PI0.5 requires depth and depth_mask")
+
+            depth_emb, depth_token_mask = self._apply_checkpoint(
+                self.depth_encoder.encode_tokens, depth
+            )
+            # The optional encoder may retain FP32 master parameters while
+            # PI0.5 runs under BF16/FP16 mixed precision. Match the pretrained
+            # prefix dtype explicitly at the fusion boundary.
+            if embs:
+                depth_emb = depth_emb.to(dtype=embs[0].dtype)
+            gate = torch.tanh(self.depth_encoder.output_gate)
+            valid_depth_tokens = depth_token_mask & depth_mask[:, None]
+            gated_depth_emb = gate * depth_emb * valid_depth_tokens.unsqueeze(-1)
+
+            self._last_depth_fusion_metrics = {
+                "depth/effective_gate": gate.detach().float(),
+                "depth/raw_token_rms": depth_emb.detach().float().square().mean().sqrt(),
+                "depth/gated_token_rms": gated_depth_emb.detach().float().square().mean().sqrt(),
+            }
+
+            if self.config.depth_fusion_mode == "cross_attention":
+                if len(embs) != 1:
+                    raise ValueError(
+                        "RGB-depth cross-attention currently requires exactly one RGB image stream, "
+                        f"received {len(embs)}"
+                    )
+                rgb_emb = embs[0]
+                depth_context = self.depth_cross_attention(
+                    rgb_emb,
+                    depth_emb,
+                    valid_depth_tokens,
+                )
+                gated_depth_context = gate * depth_context
+                fused_emb = rgb_emb + gated_depth_context
+                embs[0] = fused_emb
+                rgb_rms = rgb_emb.detach().float().square().mean().sqrt()
+                context_rms = depth_context.detach().float().square().mean().sqrt()
+                gated_context_rms = gated_depth_context.detach().float().square().mean().sqrt()
+                fused_cosine = torch.nn.functional.cosine_similarity(
+                    rgb_emb.detach().float().flatten(1),
+                    fused_emb.detach().float().flatten(1),
+                    dim=-1,
+                ).mean()
+                self._last_depth_fusion_metrics.update(
+                    {
+                        "depth/attention_context_rms": context_rms,
+                        "depth/effective_gate": gate.detach().float(),
+                        "depth/gated_token_rms": gated_context_rms,
+                        "depth/rgb_token_rms": rgb_rms,
+                        "depth/fused_token_rms": fused_emb.detach().float().square().mean().sqrt(),
+                        "depth/context_to_rgb_rms_ratio": context_rms / rgb_rms.clamp_min(1e-8),
+                        "depth/gated_to_rgb_rms_ratio": gated_context_rms / rgb_rms.clamp_min(1e-8),
+                        "depth/rgb_fused_cosine": fused_cosine,
+                        "depth/valid_token_fraction": valid_depth_tokens.detach().float().mean(),
+                    }
+                )
+            elif self.config.depth_fusion_mode == "pairwise_add":
+                if len(embs) != 1:
+                    raise ValueError(
+                        "Pairwise RGB-depth fusion currently requires exactly one RGB image stream, "
+                        f"received {len(embs)}"
+                    )
+                rgb_emb = embs[0]
+                if rgb_emb.shape != gated_depth_emb.shape:
+                    raise ValueError(
+                        "Pairwise RGB-depth fusion requires matching token shapes; "
+                        f"RGB is {tuple(rgb_emb.shape)} and depth is {tuple(gated_depth_emb.shape)}. "
+                        "Set depth_token_grid to the RGB vision-tower grid (16x16 for 224x224 PI0.5)."
+                    )
+                fused_emb = rgb_emb + gated_depth_emb
+                embs[0] = fused_emb
+                rgb_rms = rgb_emb.detach().float().square().mean().sqrt()
+                self._last_depth_fusion_metrics.update(
+                    {
+                        "depth/rgb_token_rms": rgb_rms,
+                        "depth/fused_token_rms": fused_emb.detach().float().square().mean().sqrt(),
+                        "depth/gated_to_rgb_rms_ratio": (
+                            gated_depth_emb.detach().float().square().mean().sqrt()
+                            / rgb_rms.clamp_min(1e-8)
+                        ),
+                    }
+                )
+            else:
+                bsize, num_depth_embs = gated_depth_emb.shape[:2]
+                embs.append(gated_depth_emb)
+                pad_masks.append(valid_depth_tokens)
+                att_masks += [0] * num_depth_embs
 
         # Process language tokens
         def lang_embed_func(tokens):
@@ -721,7 +871,18 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         return embs, pad_masks, att_masks, adarms_cond
 
-    def forward(self, images, img_masks, tokens, masks, actions, noise=None, time=None) -> Tensor:
+    def forward(
+        self,
+        images,
+        img_masks,
+        tokens,
+        masks,
+        actions,
+        noise=None,
+        time=None,
+        depth=None,
+        depth_mask=None,
+    ) -> Tensor:
         """Do a full training forward pass and compute the loss."""
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
@@ -733,7 +894,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, tokens, masks, depth, depth_mask
+        )
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, time)
 
         if (
@@ -785,6 +948,8 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         masks,
         noise=None,
         num_steps=None,
+        depth=None,
+        depth_mask=None,
         **kwargs: Unpack[ActionSelectKwargs],
     ) -> Tensor:
         """Do a full inference forward and compute the action."""
@@ -803,7 +968,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             )  # Use config max_action_dim for internal processing
             noise = self.sample_noise(actions_shape, device)
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, tokens, masks, depth, depth_mask
+        )
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 
@@ -1017,8 +1184,23 @@ class PI05Policy(PreTrainedPolicy):
             if remap_count > 0:
                 print(f"Remapped {remap_count} state dict keys")
 
-            # Load the remapped state dict into the model
-            missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=strict)
+            # A base RGB checkpoint cannot contain weights for an optional
+            # depth encoder introduced at fine-tuning time.
+            load_strict = strict and not model.config.depth_enabled
+            missing_keys, unexpected_keys = model.load_state_dict(
+                remapped_state_dict, strict=load_strict
+            )
+            if model.config.depth_enabled:
+                invalid_missing = [
+                    key
+                    for key in missing_keys
+                    if not key.startswith(("model.depth_encoder.", "model.depth_cross_attention."))
+                ]
+                if invalid_missing or unexpected_keys:
+                    raise RuntimeError(
+                        "Depth checkpoint initialization found incompatible non-depth keys: "
+                        f"missing={invalid_missing}, unexpected={unexpected_keys}"
+                    )
 
             if missing_keys:
                 print(f"Missing keys when loading state dict: {len(missing_keys)} keys")
@@ -1154,13 +1336,18 @@ class PI05Policy(PreTrainedPolicy):
         # Get device from model parameters
         device = next(self.parameters()).device
 
-        present_img_keys = [key for key in self.config.image_features if key in batch]
-        missing_img_keys = [key for key in self.config.image_features if key not in batch]
+        rgb_image_features = {
+            key: feature
+            for key, feature in self.config.image_features.items()
+            if not (self.config.depth_enabled and key == self.config.depth_feature_key)
+        }
+        present_img_keys = [key for key in rgb_image_features if key in batch]
+        missing_img_keys = [key for key in rgb_image_features if key not in batch]
 
         if len(present_img_keys) == 0:
             raise ValueError(
                 f"All image features are missing from the batch. At least one expected. "
-                f"(batch: {batch.keys()}) (image_features: {self.config.image_features})"
+                f"(batch: {batch.keys()}) (RGB image_features: {rgb_image_features})"
             )
 
         # Preprocess image features present in the batch
@@ -1208,6 +1395,51 @@ class PI05Policy(PreTrainedPolicy):
 
         return images, img_masks
 
+    def _preprocess_depth(self, batch: dict[str, Tensor]) -> tuple[Tensor | None, Tensor | None]:
+        """Decode metric depth and apply the RGB stream's letterbox geometry."""
+        if not self.config.depth_enabled:
+            return None, None
+
+        key = self.config.depth_feature_key
+        if key not in batch:
+            raise ValueError(f"Depth-enabled PI0.5 batch is missing {key!r}")
+
+        device = next(self.parameters()).device
+        raw_depth = batch[key]
+        depth_was_integer = not torch.is_floating_point(raw_depth)
+        depth = raw_depth.to(device=device, dtype=torch.float32)
+        if depth.ndim == 3:
+            depth = depth.unsqueeze(1)
+        elif depth.ndim == 4 and depth.shape[-1] == 1:
+            depth = depth.permute(0, 3, 1, 2)
+        if depth.ndim != 4 or depth.shape[1] != 1:
+            raise ValueError(
+                f"Expected {key!r} as [B,H,W], [B,H,W,1], or [B,1,H,W], "
+                f"received {tuple(depth.shape)}"
+            )
+
+        scale_key = self.config.depth_scale_feature_key
+        if scale_key in batch:
+            depth_scale = batch[scale_key].to(device=device, dtype=torch.float32).reshape(-1)
+            if depth_scale.numel() not in (1, depth.shape[0]):
+                raise ValueError(
+                    f"Expected {scale_key!r} to contain one scale or one scale per batch item, "
+                    f"received shape {tuple(batch[scale_key].shape)}"
+                )
+            if not torch.all(torch.isfinite(depth_scale) & (depth_scale > 0)):
+                raise ValueError(f"{scale_key!r} must contain positive finite values")
+            depth = depth * depth_scale.reshape(-1, 1, 1, 1)
+        elif depth_was_integer:
+            # The collected dataset stores D435i-style Z16 uint16 values.
+            # Float depth without a scale is assumed to already be in metres.
+            depth = depth * self.config.depth_default_scale
+
+        if self.config.depth_resize_with_rgb and depth.shape[-2:] != self.config.image_resolution:
+            depth = resize_depth_with_pad_torch(depth, *self.config.image_resolution)
+
+        depth_mask = torch.ones(depth.shape[0], dtype=torch.bool, device=device)
+        return depth.contiguous(), depth_mask
+
     def prepare_action(self, batch):
         """Pad action"""
         actions = pad_vector(batch[ACTION], self.config.max_action_dim)
@@ -1237,10 +1469,19 @@ class PI05Policy(PreTrainedPolicy):
 
         # Prepare inputs
         images, img_masks = self._preprocess_images(batch)
+        depth, depth_mask = self._preprocess_depth(batch)
         tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
 
         # Sample actions using the model (pass through RTC kwargs, no separate state needed for PI05)
-        actions = self.model.sample_actions(images, img_masks, tokens, masks, **kwargs)
+        actions = self.model.sample_actions(
+            images,
+            img_masks,
+            tokens,
+            masks,
+            depth=depth,
+            depth_mask=depth_mask,
+            **kwargs,
+        )
 
         # Unpad actions to actual action dimension
         original_action_dim = self.config.output_features[ACTION].shape[0]
@@ -1259,12 +1500,21 @@ class PI05Policy(PreTrainedPolicy):
         """
         # Prepare inputs
         images, img_masks = self._preprocess_images(batch)
+        depth, depth_mask = self._preprocess_depth(batch)
         tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
 
         actions = self.prepare_action(batch)
 
         # Compute loss (no separate state needed for PI05)
-        losses = self.model.forward(images, img_masks, tokens, masks, actions)
+        losses = self.model.forward(
+            images,
+            img_masks,
+            tokens,
+            masks,
+            actions,
+            depth=depth,
+            depth_mask=depth_mask,
+        )
 
         # Truncate losses to actual action dimensions
         original_action_dim = self.config.output_features[ACTION].shape[0]
@@ -1273,6 +1523,12 @@ class PI05Policy(PreTrainedPolicy):
         loss_dict = {
             "loss_per_dim": losses.mean(dim=[0, 1]).detach().cpu().numpy().tolist(),
         }
+        loss_dict.update(
+            {
+                name: value.item()
+                for name, value in self.model._last_depth_fusion_metrics.items()
+            }
+        )
 
         if reduction == "none":
             # Return per-sample losses (B,) by averaging over time and action dims

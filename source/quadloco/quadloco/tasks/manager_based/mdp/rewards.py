@@ -31,3 +31,40 @@ def feet_air_time(
     # no reward for zero command
     reward *= torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1) > 0.1
     return reward
+
+
+def feet_slide(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize horizontal foot velocity while a foot is in contact."""
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
+        .norm(dim=-1)
+        .max(dim=1)[0]
+        > 1.0
+    )
+    asset: Articulation = env.scene[asset_cfg.name]
+    foot_vel_xy = asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2]
+    return torch.sum(foot_vel_xy.norm(dim=-1) * contacts, dim=1)
+
+
+def stand_still_joint_deviation_l1(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    command_threshold: float = 0.1,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize deviation from the default pose only when commanded to stand."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    joint_error = torch.abs(
+        asset.data.joint_pos[:, asset_cfg.joint_ids]
+        - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    )
+    is_standing = (
+        torch.linalg.vector_norm(env.command_manager.get_command(command_name), dim=1)
+        < command_threshold
+    )
+    return torch.sum(joint_error, dim=1) * is_standing

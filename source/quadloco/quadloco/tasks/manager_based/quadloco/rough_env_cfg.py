@@ -6,7 +6,13 @@
 from isaaclab.utils import configclass
 
 from ..velocity_env_cfg import LocomotionVelocityRoughEnvCfg
-from ..navigation_env_cfg import GoalNavigationEnvCfg
+from ..navigation_env_cfg import (
+    GoalNavigationEnvCfg,
+    NearFarGoalNavigationEnvCfg,
+    ObjectRelativeGoalNavigationEnvCfg,
+    OccludedGoalNavigationEnvCfg,
+    RelationalGoalNavigationEnvCfg,
+)
 
 @configclass
 class UnitreeGo2RoughEnvCfg(LocomotionVelocityRoughEnvCfg):
@@ -77,4 +83,106 @@ class UnitreeGo2RoughNavEnvCfg_PLAY(GoalNavigationEnvCfg):
         # self.scene.terrain.terrain_generator.sub_terrains["random_rough"].proportion = 0.0
         # self.scene.terrain.terrain_generator.sub_terrains["flat"].proportion = 1.0
         # disable randomization for play
+        self.observations.policy.enable_corruption = False
+
+
+@configclass
+class UnitreeGo2RoughOccludedNavEnvCfg_PLAY(OccludedGoalNavigationEnvCfg):
+    """Occluded-object navigation with the same velocity-command interface."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.events.reset_base.params["pose_range"].update(
+            {"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)}
+        )
+        self.events.reset_base.params["velocity_range"].update(
+            {
+                "x": (0.0, 0.0),
+                "y": (0.0, 0.0),
+                "z": (0.0, 0.0),
+                "roll": (0.0, 0.0),
+                "pitch": (0.0, 0.0),
+                "yaw": (0.0, 0.0),
+            }
+        )
+        self.events.reset_robot_joints.params["position_range"] = (1.0, 1.0)
+        self.scene.num_envs = 50
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+
+
+@configclass
+class UnitreeGo2RoughRelationalNavEnvCfg_PLAY(RelationalGoalNavigationEnvCfg):
+    """Relational target-selection environment with deterministic robot reset."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.events.reset_base.params["pose_range"].update(
+            {"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)}
+        )
+        self.events.reset_base.params["velocity_range"].update(
+            {
+                "x": (0.0, 0.0),
+                "y": (0.0, 0.0),
+                "z": (0.0, 0.0),
+                "roll": (0.0, 0.0),
+                "pitch": (0.0, 0.0),
+                "yaw": (0.0, 0.0),
+            }
+        )
+        self.events.reset_robot_joints.params["position_range"] = (1.0, 1.0)
+        self.scene.num_envs = 50
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+
+
+@configclass
+class UnitreeGo2RoughNearFarNavEnvCfg_PLAY(NearFarGoalNavigationEnvCfg):
+    """Near/far relational environment with deterministic robot reset."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.events.reset_base.params["pose_range"].update(
+            {"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)}
+        )
+        self.events.reset_base.params["velocity_range"].update(
+            {
+                "x": (0.0, 0.0),
+                "y": (0.0, 0.0),
+                "z": (0.0, 0.0),
+                "roll": (0.0, 0.0),
+                "pitch": (0.0, 0.0),
+                "yaw": (0.0, 0.0),
+            }
+        )
+        self.events.reset_robot_joints.params["position_range"] = (1.0, 1.0)
+        self.scene.num_envs = 50
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+
+
+@configclass
+class UnitreeGo2RoughObjectRelativeNavEnvCfg_PLAY(
+    ObjectRelativeGoalNavigationEnvCfg
+):
+    """Metric object-relative environment with deterministic robot reset."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.events.reset_base.params["pose_range"].update(
+            {"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)}
+        )
+        self.events.reset_base.params["velocity_range"].update(
+            {
+                "x": (0.0, 0.0),
+                "y": (0.0, 0.0),
+                "z": (0.0, 0.0),
+                "roll": (0.0, 0.0),
+                "pitch": (0.0, 0.0),
+                "yaw": (0.0, 0.0),
+            }
+        )
+        self.events.reset_robot_joints.params["position_range"] = (1.0, 1.0)
+        self.scene.num_envs = 50
+        self.scene.env_spacing = 2.5
         self.observations.policy.enable_corruption = False

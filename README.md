@@ -215,19 +215,25 @@ Metric depth is omitted by default because full-resolution float32 depth is
 large. Add `--lerobot_include_depth` when depth is required. Add
 `--push_to_hub` to upload the finalized dataset using `--dataset_repo_id`.
 
-### Train the high-level velocity policy
+### Train the high-level RGB-D waypoint policy
 
-Set the dataset, output, and Hugging Face repository values at the top of
-`train_pi05_velocity.sh`, or override them with environment variables. Then run:
+The main launcher fine-tunes the PI0.5 action expert together with the small
+ConvNeXt depth encoder on two-dimensional robot-frame waypoint targets. Set
+the dataset, output, and Hugging Face repository values using environment
+variables when needed, then run:
 
 ```bash
-bash train_pi05_velocity.sh
+bash train_pi05_depth_main.sh
 ```
 
-The script converts the collected dataset to the three-dimensional
-`[vx, vy, wz]` training target when necessary, then starts PI0.5 training.
+The default dataset is the locally merged 1,500-episode RGB-D dataset. Depth
+is decoded from Z16 with a scale of `0.001` metres per unit, and the target is
+the robot-frame waypoint `[x_forward, y_left]`. Deployment converts each
+predicted waypoint deterministically into `[vx, vy, wz]` for the low-level
+locomotion policy. The legacy `train_pi05_velocity.sh` name remains as a
+compatibility wrapper.
 
-For a two-step, 12-dimensional joint-action smoke test, run:
+For a two-step RGB-D waypoint smoke test, run:
 
 ```bash
 bash train_vla_lerobot.sh

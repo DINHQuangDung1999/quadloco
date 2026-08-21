@@ -81,6 +81,27 @@ class PI05Config(PreTrainedConfig):
     freeze_vision_encoder: bool = False  # Freeze only the vision encoder
     train_expert_only: bool = False  # Freeze entire VLM, train only action expert and projections
 
+    # Optional metric-depth token encoder
+    depth_enabled: bool = False
+    depth_feature_key: str = "observation.depth.camera1"
+    depth_scale_feature_key: str = "observation.depth_scale"
+    # Metres per integer unit used when Z16 depth is supplied without an
+    # explicit per-frame scale (for example during deployment).
+    depth_default_scale: float = 0.001
+    depth_min: float = 0.05
+    depth_max: float = 20.0
+    depth_stage_depths: tuple[int, ...] = (2, 2, 4)
+    depth_stage_dims: tuple[int, ...] = (64, 128, 256)
+    depth_patch_size: int = 4
+    depth_token_grid: tuple[int, int] = (8, 8)
+    depth_drop_path_rate: float = 0.0
+    # Keep false for checkpoints trained on the stored depth resolution.
+    depth_resize_with_rgb: bool = False
+    depth_cross_attention_heads: int = 8
+    # "concatenate" preserves checkpoints trained with standalone depth tokens.
+    # "pairwise_add" adds each gated depth token to the matching RGB token.
+    depth_fusion_mode: str = "concatenate"
+
     # Optimizer settings: see openpi `AdamW`
     optimizer_lr: float = 2.5e-5  # see openpi `CosineDecaySchedule: peak_lr`
     optimizer_betas: tuple[float, float] = (0.9, 0.95)
@@ -114,6 +135,37 @@ class PI05Config(PreTrainedConfig):
 
         if self.dtype not in ["bfloat16", "float32"]:
             raise ValueError(f"Invalid dtype: {self.dtype}")
+
+        if self.depth_enabled:
+            if self.depth_fusion_mode not in ("concatenate", "pairwise_add", "cross_attention"):
+                raise ValueError(
+                    "depth_fusion_mode must be 'concatenate', 'pairwise_add', or 'cross_attention', "
+                    f"got {self.depth_fusion_mode!r}"
+                )
+            if self.depth_cross_attention_heads <= 0:
+                raise ValueError("depth_cross_attention_heads must be positive")
+            if self.depth_default_scale <= 0:
+                raise ValueError(
+                    f"depth_default_scale must be positive, got {self.depth_default_scale}"
+                )
+            if self.depth_feature_key not in (self.input_features or {}):
+                raise ValueError(
+                    f"depth_enabled=True requires {self.depth_feature_key!r} in input_features"
+                )
+            depth_feature = self.input_features[self.depth_feature_key]
+            if depth_feature.type is not FeatureType.VISUAL:
+                raise ValueError(
+                    f"{self.depth_feature_key!r} must use FeatureType.VISUAL to bypass "
+                    "state normalization"
+                )
+            if len(depth_feature.shape) != 3 or 1 not in (
+                depth_feature.shape[0],
+                depth_feature.shape[-1],
+            ):
+                raise ValueError(
+                    f"{self.depth_feature_key!r} must have shape [1,H,W] or [H,W,1], "
+                    f"received {depth_feature.shape}"
+                )
 
     def validate_features(self) -> None:
         """Validate and set up input/output features."""

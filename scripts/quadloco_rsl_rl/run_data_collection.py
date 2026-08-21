@@ -30,6 +30,16 @@ parser.add_argument(
 )
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
+    "--navigation_mode",
+    choices=("direct", "occluded", "relational", "near_far", "object_relative"),
+    default=None,
+    help=(
+        "Select the direct, occluded, relational, near/far, or object-relative "
+        "environment. "
+        "When provided, this overrides --task."
+    ),
+)
+parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
@@ -102,6 +112,15 @@ cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+if args_cli.navigation_mode is not None:
+    task_suffix = {
+        "direct": "Rough-DataCollection-v0",
+        "occluded": "Rough-Occluded-DataCollection-v0",
+        "relational": "Rough-Relational-DataCollection-v0",
+        "near_far": "Rough-NearFar-DataCollection-v0",
+        "object_relative": "Rough-ObjectRelative-DataCollection-v0",
+    }[args_cli.navigation_mode]
+    args_cli.task = f"Unitree-Go2-Quadloco-ManagerBased-{task_suffix}"
 # Camera rendering is required for RGB-D data collection, even without video recording.
 args_cli.enable_cameras = True
 
@@ -139,6 +158,7 @@ from isaaclab.envs import (
 )
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
+from isaaclab.utils.math import quat_apply, yaw_quat
 
 from isaaclab_rl.rsl_rl import (
     RslRlBaseRunnerCfg,
@@ -242,6 +262,9 @@ def _create_lerobot_dataset(
     policy_observation: torch.Tensor,
     low_level_action: torch.Tensor,
     velocity_command: torch.Tensor,
+    waypoint_command: torch.Tensor,
+    robot_position_xy: torch.Tensor,
+    active_waypoint_position_xy: torch.Tensor,
     depth: torch.Tensor | None,
     depth_output_size: tuple[int, int],
     depth_scale: float,
@@ -266,6 +289,9 @@ def _create_lerobot_dataset(
     policy_state_sample = _cpu_numpy(policy_observation, np.float32)
     low_level_action_sample = _cpu_numpy(low_level_action, np.float32)
     command_sample = _cpu_numpy(velocity_command, np.float32)
+    waypoint_sample = _cpu_numpy(waypoint_command, np.float32)
+    robot_position_sample = _cpu_numpy(robot_position_xy, np.float32)
+    waypoint_position_sample = _cpu_numpy(active_waypoint_position_xy, np.float32)
     height, width, channels = rgb_sample.shape
     features = {
         "observation.images.camera1": {
@@ -279,6 +305,15 @@ def _create_lerobot_dataset(
             "names": None,
         },
         "action": {
+            "dtype": "float32",
+            "shape": waypoint_sample.shape,
+            "names": (
+                ["x_forward", "y_left"]
+                if waypoint_sample.shape == (2,)
+                else None
+            ),
+        },
+        "observation.low_level_action": {
             "dtype": "float32",
             "shape": low_level_action_sample.shape,
             "names": None,
@@ -294,6 +329,16 @@ def _create_lerobot_dataset(
             "dtype": "float32",
             "shape": command_sample.shape,
             "names": ["vx", "vy", "wz"] if command_sample.shape == (3,) else None,
+        },
+        "observation.robot_position_xy": {
+            "dtype": "float32",
+            "shape": robot_position_sample.shape,
+            "names": ["x_world", "y_world"],
+        },
+        "observation.active_waypoint_position_xy": {
+            "dtype": "float32",
+            "shape": waypoint_position_sample.shape,
+            "names": ["x_world", "y_world"],
         },
     }
     if depth is not None:
@@ -330,6 +375,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if args_cli.collect_data:
+        # Debug markers are useful during interactive play but should not appear
+        # in recorded RGB observations.
+        env_cfg.commands.base_velocity.debug_vis = False
+        # Pushes are a locomotion-training disturbance, not part of the scripted
+        # VLA expert demonstrations.
+        if hasattr(env_cfg.events, "push_robot"):
+            env_cfg.events.push_robot = None
 
     # handle deprecated configurations
     agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, installed_version)
@@ -426,8 +479,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     num_envs = env.unwrapped.num_envs
     dataset_dir = os.path.abspath(args_cli.dataset_dir)
     trajectories = [
-        {"rgb": [], "depth": [], "action": [], "velocity_command": []} for _ in range(num_envs)
+        {
+            "rgb": [],
+            "depth": [],
+            "action": [],
+            "low_level_action": [],
+            "velocity_command": [],
+            "robot_position_xy": [],
+            "active_waypoint_position_xy": [],
+        }
+        for _ in range(num_envs)
     ]
+    # Keep episode identity and completion state outside the command term. Isaac
+    # Lab may resample a command at the time-limit boundary before the collector
+    # observes ``done``; reading goal_task_names afresh on every frame can then
+    # attach one frame of the next instruction to the episode being saved.
+    episode_tasks: list[str | None] = [None] * num_envs
+    episode_task_changed = torch.zeros(
+        num_envs, dtype=torch.bool, device=env.unwrapped.device
+    )
+    episode_goal_reached = torch.zeros(
+        num_envs, dtype=torch.bool, device=env.unwrapped.device
+    )
     num_collected = 0
     collect_data = args_cli.collect_data
     lerobot_dataset = None
@@ -460,13 +533,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 camera_obs = obs["camera"]
                 command_term = env.unwrapped.command_manager.get_term("base_velocity")
                 velocity_commands = command_term.command
+                waypoint_commands = command_term.waypoint_command
                 if not hasattr(command_term, "goal_task_names"):
                     raise AttributeError(
                         "The base_velocity command must provide goal_task_names "
                         "for LeRobot data collection."
                     )
-                frame_task = command_term.goal_task_names[0]
+                for env_id in range(num_envs):
+                    if episode_tasks[env_id] is None:
+                        episode_tasks[env_id] = command_term.goal_task_names[env_id]
+                    elif command_term.goal_task_names[env_id] != episode_tasks[env_id]:
+                        episode_task_changed[env_id] = True
+                # Acceptance is based on the terminal state, not merely on
+                # having crossed the tolerance once. This prevents a drifting
+                # or unstable post-arrival segment from being saved as expert
+                # stopping behavior.
+                episode_goal_reached[:] = command_term.goal_reached
+                frame_task = episode_tasks[0]
                 robot_data = env.unwrapped.scene["robot"].data
+                waypoint_offsets_b = torch.zeros(
+                    (num_envs, 3), device=waypoint_commands.device, dtype=waypoint_commands.dtype
+                )
+                waypoint_offsets_b[:, :2] = waypoint_commands
+                active_waypoint_positions_w = robot_data.root_pos_w + quat_apply(
+                    yaw_quat(robot_data.root_quat_w), waypoint_offsets_b
+                )
                 # Body linear velocity can be recorded separately later if needed:
                 # body_linear_velocities = robot_data.root_lin_vel_b
                 if args_cli.dataset_format == "lerobot":
@@ -480,6 +571,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             policy_observation=obs["policy"][0],
                             low_level_action=applied_actions[0],
                             velocity_command=velocity_commands[0],
+                            waypoint_command=waypoint_commands[0],
+                            robot_position_xy=robot_data.root_pos_w[0, :2],
+                            active_waypoint_position_xy=active_waypoint_positions_w[0, :2],
                             depth=camera_obs["depth"][0] if args_cli.lerobot_include_depth else None,
                             depth_output_size=(args_cli.depth_height, args_cli.depth_width),
                             depth_scale=args_cli.depth_scale,
@@ -497,7 +591,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         "observation.velocity_command": _cpu_numpy(
                             velocity_commands[0], np.float32
                         ),
-                        "action": _cpu_numpy(applied_actions[0], np.float32),
+                        "observation.low_level_action": _cpu_numpy(
+                            applied_actions[0], np.float32
+                        ),
+                        "observation.robot_position_xy": _cpu_numpy(
+                            robot_data.root_pos_w[0, :2], np.float32
+                        ),
+                        "observation.active_waypoint_position_xy": _cpu_numpy(
+                            active_waypoint_positions_w[0, :2], np.float32
+                        ),
+                        "action": _cpu_numpy(waypoint_commands[0], np.float32),
                         "task": frame_task,
                     }
                     if args_cli.lerobot_include_depth:
@@ -514,9 +617,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     for env_id in range(num_envs):
                         trajectories[env_id]["rgb"].append(camera_obs["rgb"][env_id].cpu().clone())
                         trajectories[env_id]["depth"].append(camera_obs["depth"][env_id].cpu().clone())
-                        trajectories[env_id]["action"].append(applied_actions[env_id].cpu().clone())
+                        trajectories[env_id]["action"].append(
+                            waypoint_commands[env_id].cpu().clone()
+                        )
+                        trajectories[env_id]["low_level_action"].append(
+                            applied_actions[env_id].cpu().clone()
+                        )
                         trajectories[env_id]["velocity_command"].append(
                             velocity_commands[env_id].cpu().clone()
+                        )
+                        trajectories[env_id]["robot_position_xy"].append(
+                            robot_data.root_pos_w[env_id, :2].cpu().clone()
+                        )
+                        trajectories[env_id]["active_waypoint_position_xy"].append(
+                            active_waypoint_positions_w[env_id, :2].cpu().clone()
                         )
 
             obs, _, dones, _ = env.step(actions)
@@ -527,6 +641,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             for env_id in done_env_ids if collect_data else []:
                 if num_collected >= args_cli.num_episodes:
                     break
+                if (
+                    not bool(episode_goal_reached[env_id].item())
+                    or bool(episode_task_changed[env_id].item())
+                ):
+                    if args_cli.dataset_format == "lerobot":
+                        rejected_steps = lerobot_dataset.episode_buffer["size"]
+                        lerobot_dataset.clear_episode_buffer()
+                    else:
+                        rejected_steps = len(trajectories[env_id]["action"])
+                    print(
+                        "[WARN] Discarded invalid oracle trajectory "
+                        f"({rejected_steps} steps, task={episode_tasks[env_id]!r}, "
+                        f"goal_reached={bool(episode_goal_reached[env_id].item())}, "
+                        f"task_changed={bool(episode_task_changed[env_id].item())})."
+                    )
+                    continue
                 if args_cli.dataset_format == "lerobot":
                     episode_steps = lerobot_dataset.episode_buffer["size"]
                     lerobot_dataset.save_episode()
@@ -551,8 +681,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "rgb": [],
                     "depth": [],
                     "action": [],
+                    "low_level_action": [],
                     "velocity_command": [],
+                    "robot_position_xy": [],
+                    "active_waypoint_position_xy": [],
                 }
+
+            for env_id in done_env_ids if collect_data else []:
+                episode_tasks[env_id] = None
+                episode_task_changed[env_id] = False
+                episode_goal_reached[env_id] = False
 
             # reset recurrent states for episodes that have terminated
             if version.parse(installed_version) >= version.parse("4.0.0"):

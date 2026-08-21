@@ -5,9 +5,10 @@
 
 """Play a hierarchical PI0.5 + RSL-RL policy in the Quadloco navigation task.
 
-PI0.5 receives the front RGB camera, a one-dimensional dummy state, and the
-goal instruction. It produces ``[vx, vy, wz]``. The pretrained RSL-RL policy
-then maps that velocity command and proprioception to the Go2 joint actions.
+PI0.5 receives front RGB-D, proprioception, and the goal instruction. It
+produces a robot-frame waypoint ``[x_forward, y_left]``. A deterministic
+adapter converts the waypoint to ``[vx, vy, wz]`` for the pretrained RSL-RL
+locomotion policy.
 
 Launch ``scripts/pi05_velocity_server.py`` from the LeRobot Python 3.12
 environment before launching this script from the Isaac Lab environment.
@@ -26,6 +27,7 @@ from typing import Any
 from isaaclab.app import AppLauncher
 
 import cli_args  # isort: skip
+from waypoint_adapter import waypoint_to_velocity  # isort: skip
 
 
 parser = argparse.ArgumentParser(description="Play PI0.5 velocity commands through an RSL-RL locomotion policy.")
@@ -35,7 +37,7 @@ parser.add_argument("--num_envs", type=int, default=1, help="Only one environmen
 parser.add_argument(
     "--task",
     type=str,
-    default="Unitree-Go2-Quadloco-ManagerBased-Rough-DataCollection-v0",
+    default="Unitree-Go2-Quadloco-ManagerBased-Rough-Direct-v0",
     help="Registered manager-based Quadloco navigation task.",
 )
 parser.add_argument(
@@ -50,6 +52,12 @@ parser.add_argument("--max_vx", type=float, default=1.5, help="Safety clamp for 
 parser.add_argument("--max_vy", type=float, default=1.0, help="Safety clamp for absolute lateral velocity.")
 parser.add_argument("--max_wz", type=float, default=1.5, help="Safety clamp for absolute yaw velocity.")
 parser.add_argument("--print_freq", type=int, default=25, help="Print VLA commands every N simulation steps.")
+parser.add_argument(
+    "--waypoint_vis",
+    choices=("vla", "astar", "none"),
+    default="vla",
+    help="Display the VLA waypoint, the oracle A* route, or no waypoint markers.",
+)
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -71,12 +79,15 @@ import os
 import gymnasium as gym
 import numpy as np
 import torch
+import isaaclab.sim as sim_utils
 from packaging import version
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
+from isaaclab.utils.math import quat_apply, yaw_quat
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 
 import isaaclab_tasks  # noqa: F401
@@ -99,7 +110,7 @@ def _recv_exact(connection: socket.socket, size: int) -> bytes:
     return bytes(chunks)
 
 
-class VelocityVLAClient:
+class WaypointVLAClient:
     """Small synchronous client for the Python 3.12 PI0.5 process."""
 
     def __init__(self, host: str, port: int, timeout: float):
@@ -109,9 +120,29 @@ class VelocityVLAClient:
     def close(self) -> None:
         self.connection.close()
 
-    def predict(self, rgb: np.ndarray, task: str, reset: bool) -> tuple[np.ndarray, float]:
+    def predict(
+        self,
+        rgb: np.ndarray,
+        depth_z16: np.ndarray,
+        depth_scale: float,
+        state: np.ndarray,
+        task: str,
+        reset: bool,
+    ) -> tuple[np.ndarray, np.ndarray, int, float]:
+        rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
+        depth_z16 = np.ascontiguousarray(depth_z16, dtype=np.uint16)
+        state = np.ascontiguousarray(state, dtype=np.float32)
         request = {
-            "rgb": np.ascontiguousarray(rgb, dtype=np.uint8),
+            # Send only Python primitives and bytes across environments. NumPy
+            # arrays pickled by NumPy 2.x cannot be loaded by NumPy 1.x because
+            # their private module paths differ (numpy._core vs numpy.core).
+            "rgb_bytes": rgb.tobytes(),
+            "rgb_shape": rgb.shape,
+            "depth_bytes": depth_z16.tobytes(),
+            "depth_shape": depth_z16.shape,
+            "depth_scale": float(depth_scale),
+            "state_bytes": state.tobytes(),
+            "state_shape": state.shape,
             "task": task,
             "reset": reset,
         }
@@ -126,9 +157,21 @@ class VelocityVLAClient:
         if "error" in response:
             raise RuntimeError(f"PI0.5 server failed: {response['error']}")
         action = np.asarray(response["action"], dtype=np.float32)
-        if action.shape != (3,):
-            raise ValueError(f"Expected VLA action [vx, vy, wz], received shape {action.shape}.")
-        return action, float(response["inference_s"])
+        if action.shape != (2,):
+            raise ValueError(
+                f"Expected VLA waypoint [x_forward, y_left], received shape {action.shape}."
+            )
+        action_plan = np.asarray(response["action_plan"], dtype=np.float32)
+        if action_plan.ndim != 2 or action_plan.shape[1] != 2:
+            raise ValueError(
+                f"Expected VLA action plan with shape (N, 2), received {action_plan.shape}."
+            )
+        action_plan_index = int(response["action_plan_index"])
+        if not 0 <= action_plan_index < len(action_plan):
+            raise ValueError(
+                f"Invalid action plan index {action_plan_index} for plan length {len(action_plan)}."
+            )
+        return action, action_plan, action_plan_index, float(response["inference_s"])
 
 
 def _rgb_frame(tensor: torch.Tensor) -> np.ndarray:
@@ -145,6 +188,28 @@ def _rgb_frame(tensor: torch.Tensor) -> np.ndarray:
     return np.ascontiguousarray(frame)
 
 
+def _depth_z16_frame(
+    tensor: torch.Tensor,
+    output_size: tuple[int, int] = (96, 128),
+    depth_scale: float = 0.001,
+) -> np.ndarray:
+    """Resize metric simulator depth and encode D435i-style Z16."""
+    if depth_scale != 0.001:
+        raise ValueError(f"Deployment depth scale must be 0.001, got {depth_scale}.")
+    depth = tensor.detach()
+    if depth.ndim == 3 and depth.shape[-1] == 1:
+        depth = depth[..., 0]
+    if depth.ndim != 2:
+        raise ValueError(f"Expected depth shape (H,W) or (H,W,1), received {tuple(tensor.shape)}.")
+    depth = torch.nn.functional.interpolate(
+        depth[None, None].float(), size=output_size, mode="nearest"
+    )[0, 0]
+    valid = torch.isfinite(depth) & (depth > 0)
+    encoded = torch.where(valid, torch.round(depth / depth_scale), 0.0)
+    encoded = encoded.clamp(0, np.iinfo(np.uint16).max)
+    return np.ascontiguousarray(encoded.cpu().numpy().astype(np.uint16)[..., None])
+
+
 installed_version = metadata.version("rsl-rl-lib")
 
 
@@ -157,11 +222,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
-    # PI0.5 currently consumes RGB only. Avoid allocating and computing the
-    # depth render product during playback; data-collection configuration is
-    # left unchanged.
-    env_cfg.scene.front_camera.data_types = ["rgb"]
-    env_cfg.observations.camera.depth = None
+    # RGB-D PI0.5 requires the same camera products used during collection.
+    env_cfg.scene.front_camera.data_types = ["rgb", "distance_to_image_plane"]
 
     log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
     if args_cli.checkpoint:
@@ -175,10 +237,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise TypeError("play_vla.py requires the manager-based single-agent navigation environment.")
 
     if args_cli.video:
+        task_name = args_cli.task.lower()
+        if "objectrelative" in task_name:
+            task_slug = "object_relative"
+        elif "nearfar" in task_name:
+            task_slug = "near_far"
+        elif "relational" in task_name:
+            task_slug = "relational"
+        elif "occluded" in task_name:
+            task_slug = "occluded"
+        else:
+            task_slug = "direct"
+        video_folder = os.path.join(
+            os.path.dirname(resume_path), "videos", "play_vla", task_slug
+        )
         video_kwargs = {
-            "video_folder": os.path.join(os.path.dirname(resume_path), "videos", "play_vla"),
+            "video_folder": video_folder,
             "step_trigger": lambda step: step == 0,
             "video_length": args_cli.video_length,
+            "name_prefix": f"vla-{task_slug}",
             "disable_logger": True,
         }
         print_dict(video_kwargs, nesting=4)
@@ -211,10 +288,70 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
 
     print(f"[INFO] Connecting to PI0.5 server at {args_cli.vla_host}:{args_cli.vla_port}")
-    vla_client = VelocityVLAClient(args_cli.vla_host, args_cli.vla_port, args_cli.vla_timeout)
+    vla_client = WaypointVLAClient(args_cli.vla_host, args_cli.vla_port, args_cli.vla_timeout)
     command_term = env.unwrapped.command_manager.get_term("base_velocity")
     if not hasattr(command_term, "goal_task_names") or not hasattr(command_term, "velocity_command"):
         raise TypeError("The base_velocity term must be UniformGoalVelocityCommand.")
+
+    # Hide the command term's built-in oracle markers. Playback renders one
+    # explicitly selected waypoint source below so A* and VLA cannot be
+    # mistaken for each other.
+    if hasattr(command_term, "goal_direction_visualizer"):
+        command_term.goal_direction_visualizer.set_visibility(False)
+    if hasattr(command_term, "velocity_visualizer"):
+        command_term.velocity_visualizer.set_visibility(False)
+    route_entry_visualizer = VisualizationMarkers(
+        VisualizationMarkersCfg(
+            prim_path="/Visuals/OracleRoute/entry",
+            markers={
+                "entry": sim_utils.SphereCfg(
+                    radius=0.08,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.9, 0.15, 0.1)),
+                ),
+            },
+        )
+    )
+    route_exit_visualizer = VisualizationMarkers(
+        VisualizationMarkersCfg(
+            prim_path="/Visuals/OracleRoute/exit",
+            markers={
+                "exit": sim_utils.SphereCfg(
+                    radius=0.11,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.55, 0.05)),
+                ),
+            },
+        )
+    )
+    route_goal_visualizer = VisualizationMarkers(
+        VisualizationMarkersCfg(
+            prim_path="/Visuals/OracleRoute/final_goal",
+            markers={
+                "final_goal": sim_utils.SphereCfg(
+                    radius=0.13,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.85, 0.2)),
+                ),
+            },
+        )
+    )
+    vla_waypoint_visualizer = VisualizationMarkers(
+        VisualizationMarkersCfg(
+            prim_path="/Visuals/VLA/waypoint",
+            markers={
+                "waypoint": sim_utils.SphereCfg(
+                    radius=0.13,
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(0.0, 0.85, 1.0)
+                    ),
+                ),
+            },
+        )
+    )
+    show_astar = args_cli.waypoint_vis == "astar"
+    show_vla = args_cli.waypoint_vis == "vla"
+    route_entry_visualizer.set_visibility(show_astar)
+    route_exit_visualizer.set_visibility(show_astar)
+    route_goal_visualizer.set_visibility(show_astar)
+    vla_waypoint_visualizer.set_visibility(show_vla)
 
     dt = env.unwrapped.step_dt
     obs = env.get_observations()
@@ -226,8 +363,70 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             start_time = time.perf_counter()
             task = command_term.goal_task_names[0]
             rgb = _rgb_frame(obs["camera"]["rgb"][0])
-            velocity_np, inference_s = vla_client.predict(rgb, task, reset_vla)
+            depth_z16 = _depth_z16_frame(obs["camera"]["depth"][0], depth_scale=0.001)
+            state = obs["policy"][0].detach().cpu().numpy().astype(np.float32, copy=False)
+            waypoint_np, _action_plan_np, _action_plan_index, inference_s = vla_client.predict(
+                rgb, depth_z16, 0.001, state, task, reset_vla
+            )
             reset_vla = False
+
+            ground_z = env.unwrapped.scene.env_origins[0, 2] + 0.05
+            if show_vla:
+                waypoint_b = torch.zeros(
+                    (1, 3),
+                    dtype=command_term.robot.data.root_pos_w.dtype,
+                    device=command_term.robot.data.root_pos_w.device,
+                )
+                waypoint_b[0, :2] = torch.as_tensor(
+                    waypoint_np, dtype=waypoint_b.dtype, device=waypoint_b.device
+                )
+                waypoint_w = command_term.robot.data.root_pos_w[0:1] + quat_apply(
+                    yaw_quat(command_term.robot.data.root_quat_w[0:1]), waypoint_b
+                )
+                waypoint_w[:, 2] = ground_z
+                vla_waypoint_visualizer.visualize(translations=waypoint_w)
+
+            if show_astar:
+                # Red: all intermediate A* points; orange: active point;
+                # green: final oracle goal.
+                goal_w = command_term.goal_pos_w[0:1].clone()
+                goal_w[:, 2] = ground_z
+                route_goal_visualizer.visualize(translations=goal_w)
+                has_route = hasattr(command_term, "route_waypoints_w") and hasattr(
+                    command_term, "route_lengths"
+                )
+                if has_route:
+                    route_length = int(command_term.route_lengths[0].item())
+                    final_stage = route_length - 1
+                    intermediate_w = command_term.route_waypoints_w[0, :final_stage].clone()
+                    has_intermediate = len(intermediate_w) > 0
+                    route_entry_visualizer.set_visibility(has_intermediate)
+                    if has_intermediate:
+                        intermediate_w[:, 2] = ground_z
+                        route_entry_visualizer.visualize(translations=intermediate_w)
+
+                    active_stage = int(command_term.route_stage[0].item())
+                    has_active_intermediate = active_stage < final_stage
+                    route_exit_visualizer.set_visibility(has_active_intermediate)
+                    if has_active_intermediate:
+                        active_w = command_term.route_waypoints_w[
+                            0, active_stage : active_stage + 1
+                        ].clone()
+                        active_w[:, 2] = ground_z
+                        route_exit_visualizer.visualize(translations=active_w)
+                else:
+                    route_entry_visualizer.set_visibility(False)
+                    route_exit_visualizer.set_visibility(False)
+
+            velocity_np = waypoint_to_velocity(
+                waypoint_np,
+                forward_velocity=command_term.cfg.forward_velocity,
+                yaw_gain=command_term.cfg.yaw_gain,
+                max_yaw_rate=command_term.cfg.max_yaw_rate,
+                goal_tolerance=command_term.cfg.goal_tolerance,
+                slowdown_distance=command_term.cfg.slowdown_distance,
+                minimum_approach_velocity=command_term.cfg.minimum_approach_velocity,
+            )
 
             limits = np.asarray([args_cli.max_vx, args_cli.max_vy, args_cli.max_wz], dtype=np.float32)
             velocity_np = np.clip(velocity_np, -limits, limits)
@@ -237,15 +436,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 device=command_term.velocity_command.device,
             )
 
-            with torch.inference_mode():
-                # CommandManager generates the expert command during env.step().
-                # Replace it with PI0.5's command, then recompute observations so
-                # the low-level policy sees the replacement in this same cycle.
-                command_term.velocity_command[0].copy_(velocity)
-                obs = env.get_observations()
+            # CommandManager generates the expert command during env.step().
+            # Replace it with PI0.5's command, then recompute observations so
+            # the low-level policy sees the replacement in this same cycle.
+            # Isaac Lab environment operations must stay outside inference_mode:
+            # otherwise auto-reset state can become an inference tensor and reject
+            # subsequent in-place updates.
+            command_term.velocity_command[0].copy_(velocity)
+            obs = env.get_observations()
+            with torch.no_grad():
                 joint_actions = low_level_policy(obs)
-                obs, _, dones, _ = env.step(joint_actions)
 
+            obs, _, dones, _ = env.step(joint_actions)
+            with torch.no_grad():
                 if version.parse(installed_version) >= version.parse("4.0.0"):
                     low_level_policy.reset(dones)
                 else:
@@ -254,6 +457,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if timestep % args_cli.print_freq == 0:
                 print(
                     f"[VLA] step={timestep} task={task!r} "
+                    f"waypoint=[{waypoint_np[0]:+.3f}, {waypoint_np[1]:+.3f}] "
                     f"command=[{velocity_np[0]:+.3f}, {velocity_np[1]:+.3f}, {velocity_np[2]:+.3f}] "
                     f"server_s={inference_s:.3f}"
                 )

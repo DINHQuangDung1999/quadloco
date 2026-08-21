@@ -24,7 +24,7 @@ import torch
 from typing_extensions import Unpack
 
 from lerobot.configs.policies import PreTrainedConfig
-from lerobot.configs.types import FeatureType
+from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 from lerobot.datasets.utils import dataset_to_policy_features
 from lerobot.envs.configs import EnvConfig
@@ -466,6 +466,21 @@ def make_policy(
         if env_cfg is None:
             raise ValueError("env_cfg cannot be None when ds_meta is not provided")
         features = env_to_policy_features(env_cfg)
+
+    # A rename may intentionally promote a recorded observation to the action
+    # target (for example, a recorded velocity command). Apply mapped features
+    # last so that they win if the destination key already exists.
+    if rename_map:
+        renamed_features = {
+            key: feature for key, feature in features.items() if key not in rename_map.values()
+        }
+        for key, feature in features.items():
+            destination = rename_map.get(key)
+            if destination is None:
+                continue
+            feature_type = FeatureType.ACTION if destination == ACTION else feature.type
+            renamed_features[destination] = PolicyFeature(type=feature_type, shape=feature.shape)
+        features = renamed_features
 
     cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
     if not cfg.input_features:

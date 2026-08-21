@@ -9,6 +9,7 @@ from isaaclab.sensors import TiledCameraCfg
 from isaaclab.utils import configclass
 from quadloco.tasks.manager_based.velocity_env_cfg import LocomotionVelocityRoughEnvCfg
 import quadloco.tasks.manager_based.mdp as mdp
+from quadloco.tasks.manager_based.obstacle_assets import add_office_obstacles_to_scene
 
 
 @configclass
@@ -49,12 +50,12 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
     #     env_index=0,
     # )
     # ### Behind and above
-    viewer = ViewerCfg(
-        eye=(-2.6, 0.0, 1.6),
-        lookat=(0.0, 0.0, 0.3),
-        asset_name="robot",
-        origin_type="asset_root",
-    )
+    # viewer = ViewerCfg(
+    #     eye=(-2.6, 0.0, 1.6),
+    #     lookat=(0.0, 0.0, 0.3),
+    #     asset_name="robot",
+    #     origin_type="asset_root",
+    # )
     # ### Intel D435i view
     # viewer = ViewerCfg(
     #     cam_prim_path="/World/envs/env_0/Robot/base/D435i",
@@ -86,7 +87,9 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
             ),
             width=640,
             height=480,
-            update_period=1.0 / 30.0,
+            # Collection runs at 50 Hz. Update every control step so RGB-D
+            # frames are not silently duplicated in a dataset labeled 50 Hz.
+            update_period=1.0 / 50.0,
             depth_clipping_behavior="max",
         )
 
@@ -96,7 +99,10 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
 
         self.commands.base_velocity = mdp.UniformGoalVelocityCommandCfg(
             asset_name="robot",
-            resampling_time_range=(20.0, 20.0),
+            # Navigation commands are episode-scoped. Keep command resampling
+            # beyond the environment time limit to avoid a new instruction at
+            # the terminal frame.
+            resampling_time_range=(1.0e6, 1.0e6),
             debug_vis=True,
             goal_tolerance=1.0,
             slowdown_distance=1.5,
@@ -108,11 +114,13 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
             marker_colors=("red", "green", "blue"),
             task_template="Navigate to the {color} {shape}",
             candidate_y_offsets=(-1.0, 0.0, 1.0),
-            candidate_x_error=0.5,
-            candidate_y_spacing_error=0.5,
+            # Keep the actual target x uniform on ranges.pos_x. Adding
+            # independent x jitter here would broaden it beyond [4, 8] m.
+            candidate_x_error=0.0,
+            candidate_y_spacing_error=0.75,
             ranges=mdp.UniformGoalVelocityCommandCfg.Ranges(
-                pos_x=(5.0, 5.0),
-                pos_y=(-4.0, 4.0),
+                pos_x=(4.0, 8.0),
+                pos_y=(-2.0, 2.0),
             ),
         )
 
@@ -152,37 +160,34 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
         # self.commands.base_velocity.ranges.pos_y = (0.0, 0.0)
         # self.commands.base_velocity.candidate_y_offsets = (-1.0, 0.0, 1.0)
 
-        # End an episode after the robot stays within the goal tolerance for 2 seconds.
+        # Match evaluation's 0.5 s stable-stop requirement and retain enough
+        # zero-command frames to supervise stopping behavior.
         self.terminations.goal_reached = DoneTerm(
             func=mdp.goal_reached_for_duration,
-            params={"command_name": "base_velocity", "duration_s": 0.2},
+            params={"command_name": "base_velocity", "duration_s": 0.5},
         )
 
-        # # Keep /World/ground for the pretrained policy's height scanner, but
-        # # replace the inherited generated rough terrain with a flat support
-        # # plane so it does not visually occlude the RATLab USD.
-        # self.scene.terrain.terrain_type = "plane"
-        # self.scene.terrain.terrain_generator = None
-        # self.curriculum.terrain_levels = None
 
-        # self.scene.ratlab = AssetBaseCfg(
-        #     prim_path="/World/RATLab",
-        #     init_state=AssetBaseCfg.InitialStateCfg(
-        #         pos=(0.0, 0.0, 0.0),
-        #     ),
-        #     spawn=sim_utils.UsdFileCfg(
-        #         usd_path=(
-        #             "/home/summerschool/summerschool_ws/"
-        #             "assets/rat_lab/multicorridor/empty_lab.usd"
-        #         ),
-        #         collision_props=sim_utils.CollisionPropertiesCfg(
-        #             collision_enabled=True,
-        #         ),
-        #     ),
-        # )
+        self.scene.ratlab = AssetBaseCfg(
+            prim_path="/World/ground",
+            init_state=AssetBaseCfg.InitialStateCfg(
+                pos=(3.5, 0.0, 0.0),
+                rot=(0.0, 0.0, 0.0, 1.0),
+            ),
+            spawn=sim_utils.UsdFileCfg(
+                usd_path=(
+                    "/home/summerschool/summerschool_ws/"
+                    "assets/rat_lab/multicorridor/lab_sense.usd"
+                ),
+                collision_props=sim_utils.CollisionPropertiesCfg(
+                    collision_enabled=True,
+                ),
+            ),
+        )
+        self.scene.terrain = None
 
         # self.scene.kitchen = AssetBaseCfg(
-        #     prim_path="/World/Kitchen",
+        #     prim_path="/World/ground",
         #     init_state=AssetBaseCfg.InitialStateCfg(
         #         pos=(0.0, 0.0, 0.0),
         #     ),
@@ -196,5 +201,225 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
         #         ),
         #     ),
         # )
+        # # Replace the inherited generated rough terrain with a flat support
+        # # plane so it does not visually occlude the RATLab USD.
+        # self.scene.terrain.terrain_type = "plane"
+        # self.scene.terrain.terrain_generator = None
+        # self.curriculum.terrain_levels = None
 
-        # self.scene.terrain = None
+
+        self.curriculum.terrain_levels = None
+
+
+@configclass
+class OccludedGoalNavigationEnvCfg(GoalNavigationEnvCfg):
+    """Goal navigation with a solid occluder and A*-generated waypoints."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.commands.base_velocity = mdp.OccludedGoalVelocityCommandCfg(
+            asset_name="robot",
+            resampling_time_range=(1.0e6, 1.0e6),
+            debug_vis=True,
+            goal_tolerance=1.0,
+            slowdown_distance=1.5,
+            forward_velocity=1.0,
+            # Keep the locomotion policy above its low-speed dead zone until
+            # the robot actually enters the 1 m success region.
+            minimum_approach_velocity=0.15,
+            yaw_gain=1.5,
+            max_yaw_rate=0.8,
+            marker_height=0.4,
+            marker_shapes=("pyramid", "cube", "sphere"),
+            marker_colors=("red", "green", "blue"),
+            task_template="Navigate to the {color} {shape}",
+            occluded_task_template=(
+                "Navigate to the {color} {shape} behind the {obstacle_type}"
+            ),
+            obstacle_lateral_offset_fraction=(0.4, 0.6),
+            candidate_y_offsets=(-1.0, 0.0, 1.0),
+            candidate_x_error=0.0,
+            candidate_y_spacing_error=0.5,
+            ranges=mdp.OccludedGoalVelocityCommandCfg.Ranges(
+                pos_x=(4.0, 8.0),
+                pos_y=(-2.0, 2.0),
+            ),
+        )
+
+        command_cfg = self.commands.base_velocity
+        add_office_obstacles_to_scene(
+            self.scene,
+            asset_prefix=command_cfg.occlusion_obstacle_asset_prefix,
+            unused_height=command_cfg.unused_candidate_height,
+        )
+
+
+@configclass
+class RelationalGoalNavigationEnvCfg(GoalNavigationEnvCfg):
+    """Two-pair relational target-selection navigation."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.commands.base_velocity = mdp.RelationalGoalVelocityCommandCfg(
+            asset_name="robot",
+            resampling_time_range=(1.0e6, 1.0e6),
+            debug_vis=True,
+            goal_tolerance=1.0,
+            slowdown_distance=1.5,
+            forward_velocity=1.0,
+            yaw_gain=1.5,
+            max_yaw_rate=0.8,
+            marker_height=0.4,
+            marker_shapes=("pyramid", "cube", "sphere"),
+            marker_colors=("red", "green", "blue"),
+            shape_instruction_names=("pyramid", "box", "ball"),
+            object_size_names=("small", "big"),
+            object_size_scales=(0.75, 1.25),
+            relation_types=("next_to",),
+            pair_center_y=(-1.5, 1.5),
+            within_pair_spacing_range=(0.75, 0.85),
+            target_y_jitter=0.05,
+            pair_center_y_jitter=0.2,
+            ranges=mdp.RelationalGoalVelocityCommandCfg.Ranges(
+                pos_x=(4.0, 8.0),
+                pos_y=(0.0, 0.0),
+            ),
+        )
+
+        command_cfg = self.commands.base_velocity
+        # Each pair has one colored target primitive. The paired reference is
+        # selected from the reusable office/warehouse asset catalog below.
+        for slot in range(2):
+            for shape in command_cfg.marker_shapes:
+                for color in command_cfg.marker_colors:
+                    for size_name, size_scale in zip(
+                        command_cfg.object_size_names,
+                        command_cfg.object_size_scales,
+                    ):
+                        asset_name = (
+                            f"{command_cfg.relational_asset_prefix}_"
+                            f"{slot}_{shape}_{color}_{size_name}"
+                        )
+                        setattr(
+                            self.scene,
+                            asset_name,
+                            RigidObjectCfg(
+                                prim_path=(
+                                    f"{{ENV_REGEX_NS}}/RelationalObject_"
+                                    f"{slot}_{shape}_{color}_{size_name}"
+                                ),
+                                init_state=RigidObjectCfg.InitialStateCfg(
+                                    pos=(
+                                        0.0,
+                                        0.0,
+                                        command_cfg.unused_candidate_height,
+                                    ),
+                                ),
+                                spawn=mdp.make_goal_object_spawn_cfg(
+                                    shape, color, size_scale
+                                ),
+                            ),
+                        )
+
+        for slot in range(2):
+            add_office_obstacles_to_scene(
+                self.scene,
+                asset_prefix=f"{command_cfg.relational_reference_asset_prefix}_{slot}",
+                prim_prefix=f"RelationalReference_{slot}",
+                unused_height=command_cfg.unused_candidate_height,
+            )
+
+
+@configclass
+class NearFarGoalNavigationEnvCfg(GoalNavigationEnvCfg):
+    """Select the nearest or farthest of three identical objects."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.commands.base_velocity = mdp.NearFarGoalVelocityCommandCfg(
+            asset_name="robot",
+            resampling_time_range=(1.0e6, 1.0e6),
+            debug_vis=True,
+            goal_tolerance=1.0,
+            slowdown_distance=1.5,
+            forward_velocity=1.0,
+            yaw_gain=1.5,
+            max_yaw_rate=0.8,
+            marker_height=0.4,
+            marker_shapes=("pyramid", "cube", "sphere"),
+            marker_colors=("red", "green", "blue"),
+            shape_instruction_names=("pyramid", "box", "ball"),
+            nominal_distances=(4.0, 5.5, 7.0),
+            group_x_offset_range=(-2.0, 1.0),
+            distance_jitter=0.5,
+            lateral_spacing_range=(0.75, 1.5),
+            lateral_group_jitter=0.5,
+            ranges=mdp.NearFarGoalVelocityCommandCfg.Ranges(
+                pos_x=(4.0, 8.0),
+                pos_y=(-2.0, 2.0),
+            ),
+        )
+
+        command_cfg = self.commands.base_velocity
+        for slot in range(len(command_cfg.nominal_distances)):
+            for shape in command_cfg.marker_shapes:
+                for color in command_cfg.marker_colors:
+                    asset_name = (
+                        f"{command_cfg.distance_asset_prefix}_"
+                        f"{slot}_{shape}_{color}"
+                    )
+                    setattr(
+                        self.scene,
+                        asset_name,
+                        RigidObjectCfg(
+                            prim_path=(
+                                f"{{ENV_REGEX_NS}}/DistanceObject_"
+                                f"{slot}_{shape}_{color}"
+                            ),
+                            init_state=RigidObjectCfg.InitialStateCfg(
+                                pos=(
+                                    0.0,
+                                    0.0,
+                                    command_cfg.unused_candidate_height,
+                                ),
+                            ),
+                            spawn=mdp.make_goal_object_spawn_cfg(shape, color),
+                        ),
+                    )
+
+
+@configclass
+class ObjectRelativeGoalNavigationEnvCfg(GoalNavigationEnvCfg):
+    """Metric standing positions relative to a single visible object."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.base_velocity = mdp.ObjectRelativeGoalWaypointCommandCfg(
+            asset_name="robot",
+            # Commands are episode-scoped. This must exceed episode_length_s;
+            # matching the 20 s timeout allowed the next command to be sampled
+            # immediately before termination and mislabeled the final frame.
+            resampling_time_range=(1.0e6, 1.0e6),
+            debug_vis=True,
+            goal_tolerance=0.2,
+            slowdown_distance=0.8,
+            forward_velocity=1.0,
+            yaw_gain=1.5,
+            max_yaw_rate=0.8,
+            marker_height=0.4,
+            marker_shapes=("pyramid", "cube", "sphere"),
+            marker_colors=("red", "green", "blue"),
+            shape_instruction_names=("pyramid", "box", "ball"),
+            relations=("front", "behind", "left", "right"),
+            metric_offsets=(0.5, 0.75, 1.0, 1.25),
+            candidate_y_offsets=(-1.0, 0.0, 1.0),
+            candidate_x_error=0.0,
+            candidate_y_spacing_error=0.3,
+            ranges=mdp.ObjectRelativeGoalWaypointCommandCfg.Ranges(
+                pos_x=(4.0, 8.0),
+                pos_y=(-2.0, 2.0),
+            ),
+        )

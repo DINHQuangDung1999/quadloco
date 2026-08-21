@@ -76,3 +76,4 @@ tests/
 **/gelsight_r15_data/*
 .vscode/browse.vc.db*
 */browse.vc.db
+/eval_results/

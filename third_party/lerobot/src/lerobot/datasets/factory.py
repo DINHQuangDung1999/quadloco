@@ -89,6 +89,14 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             cfg.dataset.repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision
         )
         delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
+        # If a recorded observation is promoted to the policy action by the
+        # training rename map, load it with the same temporal horizon as the
+        # original action. Otherwise it remains a single frame and PI0.5 sees
+        # the batch dimension as its action-token sequence length.
+        if delta_timestamps is not None:
+            for source, destination in cfg.rename_map.items():
+                if destination == ACTION and ACTION in delta_timestamps:
+                    delta_timestamps[source] = list(delta_timestamps[ACTION])
         if not cfg.dataset.streaming:
             dataset = LeRobotDataset(
                 cfg.dataset.repo_id,

@@ -70,7 +70,7 @@ class MySceneCfg(InteractiveSceneCfg):
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
         ray_alignment='yaw',
         pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
-        debug_vis=True,
+        debug_vis=False,
         mesh_prim_paths=["/World/ground"],
     )
     contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", 
@@ -100,7 +100,7 @@ class CommandsCfg:
     base_velocity = mdp.UniformVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(10.0, 10.0),
-        rel_standing_envs=0.05,
+        rel_standing_envs=0.1,
         rel_heading_envs=1.0,
         heading_command=True,
         heading_control_stiffness=0.5,
@@ -117,7 +117,7 @@ class ActionsCfg:
     joint_pos = JointPositionActionCfg(
         asset_name="robot",
         joint_names=[".*"],
-        scale=0.5,
+        scale=0.25,
         use_default_offset=True, 
         clip={".*": (-100.0, 100.0)}
     )
@@ -240,12 +240,12 @@ class EventCfg:
                 "yaw": (-math.pi, math.pi),
             },
             "velocity_range": {
-                "x": (-0.5, 0.5),
-                "y": (-0.5, 0.5),
-                "z": (-0.5, 0.5),
-                "roll": (-0.5, 0.5),
-                "pitch": (-0.5, 0.5),
-                "yaw": (-0.5, 0.5),
+                "x": (-0.1, 0.1),
+                "y": (-0.1, 0.1),
+                "z": (0.0, 0.0),
+                "roll": (0.0, 0.0),
+                "pitch": (0.0, 0.0),
+                "yaw": (-0.1, 0.1),
             },
             # "pose_range": {
             # },
@@ -258,7 +258,7 @@ class EventCfg:
         func=mdp.reset_joints_by_scale,
         mode="reset",
         params={
-            "position_range": (0.5, 1.5),
+            "position_range": (0.9, 1.1),
             "velocity_range": (0.0, 0.0),
         },
     )
@@ -279,7 +279,7 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "mass_distribution_params": (-5.0, 5.0),
+            "mass_distribution_params": (-1.0, 3.0),
             "operation": "add",
         },
     )
@@ -299,12 +299,33 @@ class EventCfg:
 
     actuator_gains = EventTerm(
         func=mdp.randomize_actuator_gains,
-        mode="startup",
+        mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
             "stiffness_distribution_params": (0.9, 1.1),
             "damping_distribution_params": (0.9, 1.1),
             "operation": "scale",
+        },
+    )
+
+    motor_strength = EventTerm(
+        func=mdp.randomize_motor_strength,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "strength_distribution_params": (0.9, 1.1),
+        },
+    )
+
+    push_robot = EventTerm(
+        func=mdp.push_by_setting_velocity,
+        mode="interval",
+        interval_range_s=(8.0, 12.0),
+        params={
+            "velocity_range": {
+                "x": (-0.4, 0.4),
+                "y": (-0.4, 0.4),
+            }
         },
     )
 
@@ -315,48 +336,87 @@ class RewardsCfg:
     # -- task
     track_lin_vel_xy_exp = RewTerm(
         func=mdp.track_lin_vel_xy_exp, 
-        weight=1.0, 
+        weight=1.5,
         params={
             "command_name": "base_velocity", 
             "std": math.sqrt(0.25)
             })
     track_ang_vel_z_exp = RewTerm(
         func=mdp.track_ang_vel_z_exp, 
-        weight=0.5, 
+        weight=0.75,
         params={
             "command_name": "base_velocity", 
             "std": math.sqrt(0.25)
             })
     # -- penalties
     lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
-    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.01)
+    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.02)
+    dof_torques_l2 = RewTerm(func=mdp.joint_torques_l2, weight=-2.0e-4)
     dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
     base_height_l2 = RewTerm(
         func=mdp.base_height_l2, 
         weight=-1.0,
         params={
-            "target_height": 0.35,
+            "target_height": 0.32,
             "asset_cfg": SceneEntityCfg("robot"),
             "sensor_cfg": SceneEntityCfg("height_scanner"),
         })
     feet_air_time = RewTerm(
         func=mdp.feet_air_time,
-        weight=1.5,
+        weight=0.1,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",
-            "threshold": 0.5,
+            "threshold": 0.3,
+        },
+    )
+    feet_slide = RewTerm(
+        func=mdp.feet_slide,
+        weight=-0.1,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
         },
     )
     flat_orientation_l2 = RewTerm(
         func=mdp.flat_orientation_l2, 
-        weight=-0.2)
+        weight=-1.0)
+
+    undesired_contacts = RewTerm(
+        func=mdp.undesired_contacts,
+        weight=-1.0,
+        params={
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=[".*_thigh", ".*_calf"],
+            ),
+            "threshold": 1.0,
+        },
+    )
+
+    dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-0.1)
     
     hip_deviation = RewTerm(
         func=mdp.joint_deviation_l1,
-        weight=-0.4,
+        weight=-0.1,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_joint"])},
+    )
+
+    leg_deviation = RewTerm(
+        func=mdp.joint_deviation_l1,
+        weight=-0.02,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_thigh_joint", ".*_calf_joint"])},
+    )
+
+    stand_still = RewTerm(
+        func=mdp.stand_still_joint_deviation_l1,
+        weight=-0.5,
+        params={
+            "command_name": "base_velocity",
+            "command_threshold": 0.1,
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+        },
     )
 
 @configclass
@@ -413,6 +473,17 @@ class LocomotionVelocityRoughEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
         self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
+
+        # Flat floors in deployment differ mainly in friction and contain small
+        # seams or height imperfections. Keep most environments perfectly flat
+        # and reserve a minority for mild, non-obstacle-like roughness.
+        if self.scene.terrain.terrain_generator is not None:
+            sub_terrains = self.scene.terrain.terrain_generator.sub_terrains
+            if "flat" in sub_terrains:
+                sub_terrains["flat"].proportion = 0.8
+            if "random_rough" in sub_terrains:
+                sub_terrains["random_rough"].proportion = 0.2
+                sub_terrains["random_rough"].noise_range = (0.0, 0.035)
         # update sensor update periods
         # we tick all the sensors based on the smallest update period (physics update period)
         if self.scene.height_scanner is not None:

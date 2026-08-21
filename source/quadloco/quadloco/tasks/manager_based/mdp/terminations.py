@@ -49,17 +49,13 @@ class goal_reached_for_duration(ManagerTermBase):
         self.reached_once[new_goal] = False
         self.goal_generation[:] = command_term.goal_generation
 
-        # Latch the first arrival. Small post-arrival drift must not restart the
-        # delay; only an episode reset or a newly generated goal clears it.
-        self.reached_once |= reached
-        self.time_at_goal[self.reached_once] += env.step_dt
-
-        # Alternative: require the robot to remain inside the goal tolerance
-        # continuously for ``duration_s``. This is stricter, but small drift can
-        # repeatedly reset the timer after the velocity command has become zero.
-        # self.time_at_goal[:] = torch.where(
-        #     reached,
-        #     self.time_at_goal + env.step_dt,
-        #     torch.zeros_like(self.time_at_goal),
-        # )
+        # Require continuous residence in the goal region. Latching the first
+        # crossing can save an episode after the robot has drifted back out,
+        # which creates contradictory stopping demonstrations.
+        self.reached_once[:] = reached
+        self.time_at_goal[:] = torch.where(
+            reached,
+            self.time_at_goal + env.step_dt,
+            torch.zeros_like(self.time_at_goal),
+        )
         return self.time_at_goal >= duration_s

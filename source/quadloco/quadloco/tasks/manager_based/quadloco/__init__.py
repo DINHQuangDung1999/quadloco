@@ -78,6 +78,102 @@ gym.register(
 )
 
 gym.register(
+    id="Unitree-Go2-Quadloco-ManagerBased-Rough-Occluded-DataCollection-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.rough_env_cfg:UnitreeGo2RoughOccludedNavEnvCfg_PLAY"
+        ),
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_rough_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_ppo_cfg:UnitreeGo2RoughPPORunnerCfg"
+        ),
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_rough_ppo_cfg.yaml",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Unitree-Go2-Quadloco-ManagerBased-Rough-Relational-DataCollection-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.rough_env_cfg:UnitreeGo2RoughRelationalNavEnvCfg_PLAY"
+        ),
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_rough_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_ppo_cfg:UnitreeGo2RoughPPORunnerCfg"
+        ),
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_rough_ppo_cfg.yaml",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Unitree-Go2-Quadloco-ManagerBased-Rough-NearFar-DataCollection-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.rough_env_cfg:UnitreeGo2RoughNearFarNavEnvCfg_PLAY"
+        ),
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_rough_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_ppo_cfg:UnitreeGo2RoughPPORunnerCfg"
+        ),
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_rough_ppo_cfg.yaml",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Unitree-Go2-Quadloco-ManagerBased-Rough-ObjectRelative-DataCollection-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.rough_env_cfg:"
+            "UnitreeGo2RoughObjectRelativeNavEnvCfg_PLAY"
+        ),
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_rough_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_ppo_cfg:UnitreeGo2RoughPPORunnerCfg"
+        ),
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_rough_ppo_cfg.yaml",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)
+
+# Neutral task IDs for policy playback and evaluation.  Keep the registrations
+# above as collection-specific aliases so existing dataset commands continue to
+# work without presenting evaluation runs as data collection.
+_NAVIGATION_ENV_CONFIGS = {
+    "Direct": "UnitreeGo2RoughNavEnvCfg_PLAY",
+    "Occluded": "UnitreeGo2RoughOccludedNavEnvCfg_PLAY",
+    "Relational": "UnitreeGo2RoughRelationalNavEnvCfg_PLAY",
+    "NearFar": "UnitreeGo2RoughNearFarNavEnvCfg_PLAY",
+    "ObjectRelative": "UnitreeGo2RoughObjectRelativeNavEnvCfg_PLAY",
+}
+
+for _task_name, _env_cfg_name in _NAVIGATION_ENV_CONFIGS.items():
+    gym.register(
+        id=f"Unitree-Go2-Quadloco-ManagerBased-Rough-{_task_name}-v0",
+        entry_point="isaaclab.envs:ManagerBasedRLEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"{__name__}.rough_env_cfg:{_env_cfg_name}",
+            "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_rough_ppo_cfg.yaml",
+            "rsl_rl_cfg_entry_point": (
+                f"{agents.__name__}.rsl_rl_ppo_cfg:UnitreeGo2RoughPPORunnerCfg"
+            ),
+            "skrl_cfg_entry_point": f"{agents.__name__}:skrl_rough_ppo_cfg.yaml",
+            "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+        },
+    )
+
+gym.register(
     id="Unitree-Go2-Quadloco-ManagerBased-Vision-Rough-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,

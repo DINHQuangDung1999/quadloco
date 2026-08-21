@@ -36,6 +36,7 @@ from lerobot.envs.utils import close_envs
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.processor.rename_processor import rename_stats
 from lerobot.rl.wandb_utils import WandBLogger
 from lerobot.scripts.lerobot_eval import eval_policy_all
 from lerobot.utils.import_utils import register_third_party_plugins
@@ -120,6 +121,40 @@ def update_policy(
 
     # Use accelerator's backward method
     accelerator.backward(loss)
+
+    # Depth-specific gradients are cheap to inspect and reveal whether the gate
+    # or encoder is receiving a useful learning signal before global clipping.
+    unwrapped_policy = accelerator.unwrap_model(policy, keep_fp32_wrapper=True)
+    depth_encoder = getattr(getattr(unwrapped_policy, "model", None), "depth_encoder", None)
+    depth_cross_attention = getattr(
+        getattr(unwrapped_policy, "model", None), "depth_cross_attention", None
+    )
+    if depth_encoder is not None:
+        depth_parameters = [
+            parameter for parameter in depth_encoder.parameters() if parameter.grad is not None
+        ]
+        if depth_parameters:
+            depth_grad_norm = torch.nn.utils.clip_grad_norm_(
+                depth_parameters, float("inf"), error_if_nonfinite=False
+            )
+            output_dict["depth/grad_norm_preclip"] = depth_grad_norm.item()
+        if depth_encoder.output_gate.grad is not None:
+            output_dict["depth/gate_grad_abs_preclip"] = (
+                depth_encoder.output_gate.grad.detach().abs().item()
+            )
+    if depth_cross_attention is not None:
+        cross_attention_parameters = [
+            parameter
+            for parameter in depth_cross_attention.parameters()
+            if parameter.grad is not None
+        ]
+        if cross_attention_parameters:
+            cross_attention_grad_norm = torch.nn.utils.clip_grad_norm_(
+                cross_attention_parameters, float("inf"), error_if_nonfinite=False
+            )
+            output_dict["depth/cross_attention_grad_norm_preclip"] = (
+                cross_attention_grad_norm.item()
+            )
 
     # Clip gradients if specified
     if grad_clip_norm > 0:
@@ -249,11 +284,12 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     accelerator.wait_for_everyone()
 
     # Create processors - only provide dataset_stats if not resuming from saved processors
+    dataset_stats = rename_stats(dataset.meta.stats, cfg.rename_map)
     processor_kwargs = {}
     postprocessor_kwargs = {}
     if (cfg.policy.pretrained_path and not cfg.resume) or not cfg.policy.pretrained_path:
         # Only provide dataset_stats when not resuming from saved processor state
-        processor_kwargs["dataset_stats"] = dataset.meta.stats
+        processor_kwargs["dataset_stats"] = dataset_stats
 
     # For SARM, always provide dataset_meta for progress normalization
     if cfg.policy.type == "sarm":
@@ -263,7 +299,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         processor_kwargs["preprocessor_overrides"] = {
             "device_processor": {"device": device.type},
             "normalizer_processor": {
-                "stats": dataset.meta.stats,
+                "stats": dataset_stats,
                 "features": {**policy.config.input_features, **policy.config.output_features},
                 "norm_map": policy.config.normalization_mapping,
             },
@@ -273,7 +309,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         }
         postprocessor_kwargs["postprocessor_overrides"] = {
             "unnormalizer_processor": {
-                "stats": dataset.meta.stats,
+                "stats": dataset_stats,
                 "features": policy.config.output_features,
                 "norm_map": policy.config.normalization_mapping,
             },
@@ -407,6 +443,12 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     for _ in range(step, cfg.steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
+        # Support remapping a recorded observation into the supervised action
+        # target. Do this before batch_to_transition separates observations and
+        # actions inside the policy preprocessor.
+        for source, destination in cfg.rename_map.items():
+            if source in batch:
+                batch[destination] = batch.pop(source)
         batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
@@ -433,6 +475,19 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
 
         if is_log_step:
             logging.info(train_tracker)
+            depth_log_values = {
+                key: value
+                for key, value in output_dict.items()
+                if key.startswith("depth/")
+            }
+            if depth_log_values:
+                logging.info(
+                    "depth metrics: %s",
+                    " ".join(
+                        f"{key.removeprefix('depth/')}={float(value):.6g}"
+                        for key, value in sorted(depth_log_values.items())
+                    ),
+                )
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
                 if output_dict:

@@ -7,18 +7,22 @@ from typing import TYPE_CHECKING
 import torch
 import trimesh
 
+from .astar_planner import RectangleObstacle, plan_astar
+from ...obstacle_assets import OFFICE_OBSTACLE_SPECS
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.managers import CommandTerm, CommandTermCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
-from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG
+from isaaclab.markers.config import GREEN_ARROW_X_MARKER_CFG
 from isaaclab.sim.spawners.meshes.meshes import _spawn_mesh_geom_from_mesh
 from isaaclab.sim.utils import clone, get_current_stage
 from isaaclab.utils import configclass
-from isaaclab.utils.math import quat_apply_inverse, quat_from_euler_xyz, quat_mul, yaw_quat
+from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_from_euler_xyz, quat_mul, yaw_quat
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
+
 
 
 @clone
@@ -52,7 +56,19 @@ GOAL_OBJECT_COLORS = {
 }
 
 
-def make_goal_object_spawn_cfg(shape: str, color: str):
+def goal_object_center_height(shape: str, size_scale: float = 1.0) -> float:
+    """Return the center Z that places a goal object's bottom on the ground."""
+    # trimesh.creation.cone() authors our pyramid over [0, height], whereas
+    # Isaac Lab's cuboid and sphere primitives are centered on their origin.
+    base_origin_heights = {"pyramid": 0.0, "cube": 0.125, "sphere": 0.15}
+    if shape not in base_origin_heights:
+        raise ValueError(f"Unsupported goal object shape: {shape}")
+    return base_origin_heights[shape] * size_scale
+
+
+def make_goal_object_spawn_cfg(
+    shape: str, color: str, size_scale: float = 1.0
+):
     """Create non-colliding kinematic goal geometry visible to RGB-D cameras."""
     if color not in GOAL_OBJECT_COLORS:
         raise ValueError(f"Unsupported goal object color: {color}")
@@ -69,20 +85,25 @@ def make_goal_object_spawn_cfg(shape: str, color: str):
         ),
     }
     if shape == "pyramid":
-        return PyramidCfg(radius=0.18, height=0.3, **common)
+        return PyramidCfg(
+            radius=0.18 * size_scale,
+            height=0.3 * size_scale,
+            **common,
+        )
     if shape == "cube":
-        return sim_utils.CuboidCfg(size=(0.25, 0.25, 0.25), **common)
+        side = 0.25 * size_scale
+        return sim_utils.CuboidCfg(size=(side, side, side), **common)
     if shape == "sphere":
-        return sim_utils.SphereCfg(radius=0.15, **common)
+        return sim_utils.SphereCfg(radius=0.15 * size_scale, **common)
     raise ValueError(f"Unsupported goal object shape: {shape}")
 
 
-class UniformGoalVelocityCommand(CommandTerm):
-    """Sample planar goals and generate base velocity commands toward them.
+class UniformGoalVelocityCommandDirect(CommandTerm):
+    """Sample planar goals and expose waypoint plus derived velocity commands.
 
-    The command has the locomotion-policy-compatible form ``[vx, vy, wz]``.
-    Goal positions are stored in world coordinates and transformed into the
-    robot's yaw-aligned base frame every environment step.
+    ``waypoint_command`` is the high-level robot-frame ``[x_forward, y_left]``
+    target intended for the VLA. ``command`` remains the deterministically
+    derived ``[vx, vy, wz]`` input required by the low-level locomotion policy.
     """
 
     cfg: UniformGoalVelocityCommandCfg
@@ -96,6 +117,7 @@ class UniformGoalVelocityCommand(CommandTerm):
         self.heading_error = torch.zeros(self.num_envs, device=self.device)
         self.goal_reached = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.goal_generation = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.waypoint_command = torch.zeros(self.num_envs, 2, device=self.device)
         self.velocity_command = torch.zeros(self.num_envs, 3, device=self.device)
         self.marker_indices = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
         self.candidate_pos_w = torch.zeros(self.num_envs, 1, 3, device=self.device)
@@ -123,6 +145,7 @@ class UniformGoalVelocityCommand(CommandTerm):
             env_ids = slice(None)
         self.goal_pos_w[env_ids] = goal_pos_w.to(device=self.device, dtype=self.goal_pos_w.dtype)
         self.goal_reached[env_ids] = False
+        self.waypoint_command[env_ids] = 0.0
         self.velocity_command[env_ids] = 0.0
         self.goal_generation[env_ids] += 1
 
@@ -188,6 +211,7 @@ class UniformGoalVelocityCommand(CommandTerm):
         self.goal_reached[env_ids] = False
         self.goal_pos_b[env_ids] = 0.0
         self.heading_error[env_ids] = 0.0
+        self.waypoint_command[env_ids] = 0.0
         self.velocity_command[env_ids] = 0.0
         self.goal_generation[env_ids] += 1
 
@@ -239,6 +263,11 @@ class UniformGoalVelocityCommand(CommandTerm):
                 root_pose[match_rows, :3] = self.candidate_pos_w[
                     env_ids[match_rows], candidate_indices
                 ]
+                shape_index = marker_index // len(self.cfg.marker_colors)
+                root_pose[match_rows, 2] = (
+                    self._env.scene.env_origins[env_ids[match_rows], 2]
+                    + goal_object_center_height(self.cfg.marker_shapes[shape_index])
+                )
 
             asset.write_root_pose_to_sim(root_pose, env_ids=env_ids)
 
@@ -247,24 +276,36 @@ class UniformGoalVelocityCommand(CommandTerm):
         target_vec_b = quat_apply_inverse(yaw_quat(self.robot.data.root_quat_w), target_vec_w)
 
         self.goal_pos_b[:] = target_vec_b[:, :2]
-        self.heading_error[:] = torch.atan2(self.goal_pos_b[:, 1], self.goal_pos_b[:, 0])
+        self.waypoint_command[:] = self.goal_pos_b
         distance = torch.linalg.vector_norm(self.goal_pos_b, dim=-1)
         self.goal_reached[:] = distance < self.cfg.goal_tolerance
 
-        heading_scale = torch.clamp(torch.cos(self.heading_error), min=0.0)
         distance_scale = torch.clamp(
             (distance - self.cfg.goal_tolerance) / (self.cfg.slowdown_distance - self.cfg.goal_tolerance),
             min=0.0,
             max=1.0,
         )
-        self.velocity_command[:, 0] = self.cfg.forward_velocity * heading_scale * distance_scale
+        self._waypoint_to_velocity(distance_scale)
+        self.velocity_command[self.goal_reached] = 0.0
+
+    def _waypoint_to_velocity(self, distance_scale: torch.Tensor) -> None:
+        """Deterministically convert the active waypoint for the low-level policy."""
+        self.heading_error[:] = torch.atan2(
+            self.waypoint_command[:, 1], self.waypoint_command[:, 0]
+        )
+        heading_scale = torch.clamp(torch.cos(self.heading_error), min=0.0)
+        approach_velocity = self.cfg.forward_velocity * distance_scale
+        if self.cfg.minimum_approach_velocity > 0.0:
+            approach_velocity = torch.clamp(
+                approach_velocity, min=self.cfg.minimum_approach_velocity
+            )
+        self.velocity_command[:, 0] = approach_velocity * heading_scale
         self.velocity_command[:, 1] = 0.0
         self.velocity_command[:, 2] = torch.clamp(
             self.cfg.yaw_gain * self.heading_error,
             min=-self.cfg.max_yaw_rate,
             max=self.cfg.max_yaw_rate,
         )
-        self.velocity_command[self.goal_reached] = 0.0
 
     def _update_metrics(self):
         self.metrics["position_error"][:] = torch.linalg.vector_norm(self.goal_pos_b, dim=-1)
@@ -282,6 +323,10 @@ class UniformGoalVelocityCommand(CommandTerm):
             self.velocity_visualizer.set_visibility(False)
             if hasattr(self, "goal_direction_visualizer"):
                 self.goal_direction_visualizer.set_visibility(False)
+
+    def _debug_direction_b(self) -> torch.Tensor:
+        """Return the robot-frame displacement represented by the waypoint dot."""
+        return self.waypoint_command
 
     def _debug_vis_callback(self, event):
         if not self.robot.is_initialized:
@@ -303,22 +348,26 @@ class UniformGoalVelocityCommand(CommandTerm):
             scales=arrow_scale,
         )
 
-        # Show the goal bearing separately because wz cannot be represented by a linear arrow.
-        goal_arrow_quat_b = quat_from_euler_xyz(zeros, zeros, self.heading_error)
-        goal_arrow_quat_w = quat_mul(yaw_quat(self.robot.data.root_quat_w), goal_arrow_quat_b)
-        goal_arrow_scale = torch.tensor(
-            self.cfg.goal_direction_visualizer_cfg.markers["arrow"].scale, device=self.device
-        ).repeat(self.num_envs, 1)
-        self.goal_direction_visualizer.visualize(
-            translations=base_pos_w,
-            orientations=goal_arrow_quat_w,
-            scales=goal_arrow_scale,
+        # Show the active navigation waypoint as a dot on the ground.  The
+        # command is expressed in the robot's yaw-aligned frame, so rotate it
+        # into the world frame before adding it to the robot position.
+        debug_direction_b = self._debug_direction_b()
+        waypoint_offset_b = torch.zeros_like(base_pos_w)
+        waypoint_offset_b[:, :2] = debug_direction_b
+        waypoint_pos_w = self.robot.data.root_pos_w + quat_apply(
+            yaw_quat(self.robot.data.root_quat_w), waypoint_offset_b
         )
+        waypoint_pos_w[:, 2] = self._env.scene.env_origins[:, 2] + 0.05
+        self.goal_direction_visualizer.visualize(
+            translations=waypoint_pos_w,
+        )
+
+
 
 
 def generated_goal(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
     """Return ``[goal_x_b, goal_y_b, heading_error]`` from a goal command term."""
-    term: UniformGoalVelocityCommand = env.command_manager.get_term(command_name)
+    term: UniformGoalVelocityCommandDirect = env.command_manager.get_term(command_name)
     return torch.cat((term.goal_pos_b, term.heading_error.unsqueeze(-1)), dim=-1)
 
 
@@ -326,12 +375,13 @@ def generated_goal(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
 class UniformGoalVelocityCommandCfg(CommandTermCfg):
     """Configuration for :class:`UniformGoalVelocityCommand`."""
 
-    class_type: type = UniformGoalVelocityCommand
+    class_type: type = UniformGoalVelocityCommandDirect
 
     asset_name: str = MISSING
     goal_tolerance: float = 0.2
     marker_height: float = 0.15
     forward_velocity: float = 0.4
+    minimum_approach_velocity: float = 0.0
     yaw_gain: float = 1.5
     max_yaw_rate: float = 0.8
     slowdown_distance: float = 0.75
@@ -359,10 +409,15 @@ class UniformGoalVelocityCommandCfg(CommandTermCfg):
         prim_path="/Visuals/Command/navigation_velocity"
     )
     velocity_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
-    goal_direction_visualizer_cfg: VisualizationMarkersCfg = BLUE_ARROW_X_MARKER_CFG.replace(
-        prim_path="/Visuals/Command/navigation_goal_direction"
+    goal_direction_visualizer_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
+        prim_path="/Visuals/Command/navigation_waypoint",
+        markers={
+            "dot": sim_utils.SphereCfg(
+                radius=0.08,
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.2, 1.0)),
+            ),
+        },
     )
-    goal_direction_visualizer_cfg.markers["arrow"].scale = (1.0, 0.5, 0.5)
 
     def __post_init__(self):
         supported_shapes = {"pyramid", "cube", "sphere"}
@@ -393,3 +448,9 @@ class UniformGoalVelocityCommandCfg(CommandTermCfg):
             raise ValueError("candidate_y_spacing_error must be nonnegative.")
         if self.slowdown_distance <= self.goal_tolerance:
             raise ValueError("slowdown_distance must be greater than goal_tolerance.")
+        if not 0.0 <= self.minimum_approach_velocity <= self.forward_velocity:
+            raise ValueError(
+                "minimum_approach_velocity must be between zero and forward_velocity."
+            )
+
+

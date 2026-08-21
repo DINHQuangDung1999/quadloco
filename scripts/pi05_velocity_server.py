@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serve a LeRobot PI0.5 velocity policy to the Isaac Lab play process.
+"""Serve a LeRobot PI0.5 waypoint or direct-velocity policy to Isaac Lab.
 
 This server targets the LeRobot 0.4.4 checkout installed in the Isaac Lab
 environment. The client in ``quadloco_rsl_rl/play_vla.py`` deliberately uses
@@ -66,7 +66,7 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=Path(
             "/home/summerschool/summerschool_ws/quadloco/outputs/"
-            "pi05_quadloco_velocity/checkpoints/last/pretrained_model"
+            "pi05_quadloco_depth_main_200k/checkpoints/last/pretrained_model"
         ),
         help="LeRobot pretrained_model directory.",
     )
@@ -226,6 +226,9 @@ def main() -> None:
 
     device = torch.device(args.device)
     policy_cfg = _load_policy_config_compat(checkpoint)
+    action_dim = policy_cfg.output_features["action"].shape[0]
+    if action_dim not in (2, 3):
+        raise ValueError(f"Expected a 2D waypoint or 3D velocity action, received {action_dim}D.")
     policy_cfg.device = str(device)
     policy_class = get_policy_class(policy_cfg.type)
 
@@ -243,27 +246,47 @@ def main() -> None:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((args.host, args.port))
         server.listen(1)
-        print(f"[INFO] PI0.5 velocity server ready at {args.host}:{args.port}")
+        action_kind = "waypoint" if action_dim == 2 else "direct velocity"
+        print(f"[INFO] PI0.5 {action_kind} server ready at {args.host}:{args.port}")
 
         while True:
             connection, address = server.accept()
             print(f"[INFO] Isaac client connected from {address[0]}:{address[1]}")
             with connection:
+                action_plan: np.ndarray | None = None
+                action_plan_index = 0
                 try:
                     while True:
                         request = _recv_message(connection)
                         if request.get("reset", False):
                             policy.reset()
+                            action_plan = None
+                            action_plan_index = 0
 
-                        rgb = np.asarray(request["rgb"])
+                        rgb_shape = tuple(request["rgb_shape"])
+                        rgb = np.frombuffer(request["rgb_bytes"], dtype=np.uint8).reshape(rgb_shape)
                         if rgb.ndim != 3 or rgb.shape[-1] != 3:
                             raise ValueError(f"Expected HWC RGB input, received {rgb.shape}.")
 
+                        depth_shape = tuple(request["depth_shape"])
+                        depth = np.frombuffer(request["depth_bytes"], dtype=np.uint16).reshape(depth_shape)
+                        if depth.ndim != 3 or depth.shape[-1] != 1:
+                            raise ValueError(f"Expected HWC Z16 depth input, received {depth.shape}.")
+                        depth_scale = float(request["depth_scale"])
+                        if not np.isclose(depth_scale, 0.001):
+                            raise ValueError(f"Expected depth scale 0.001, received {depth_scale}.")
+
+                        state_shape = tuple(request["state_shape"])
+                        state = np.frombuffer(request["state_bytes"], dtype=np.float32).reshape(state_shape)
+
                         observation = {
                             "observation.images.camera1": np.ascontiguousarray(rgb, dtype=np.uint8),
-                            "observation.state": np.zeros((1,), dtype=np.float32),
+                            "observation.depth.camera1": np.ascontiguousarray(depth, dtype=np.uint16),
+                            "observation.depth_scale": np.asarray([depth_scale], dtype=np.float32),
+                            "observation.state": np.ascontiguousarray(state, dtype=np.float32),
                         }
                         start = time.perf_counter()
+                        queue_was_empty = len(policy._action_queue) == 0
                         action = predict_action(
                             observation=observation,
                             policy=policy,
@@ -276,16 +299,48 @@ def main() -> None:
                         action_np = action.detach().cpu().numpy().astype(np.float32, copy=False)
                         # LeRobot 0.4 keeps the singleton inference batch
                         # dimension, whereas 0.6 returns the action squeezed.
-                        if action_np.shape == (1, 3):
+                        if action_np.shape == (1, action_dim):
                             action_np = action_np[0]
-                        if action_np.shape != (3,):
+                        if action_np.shape != (action_dim,):
                             raise ValueError(
-                                f"Expected PI0.5 velocity action shape (3,), received {action_np.shape}."
+                                f"Expected PI0.5 action shape ({action_dim},), received {action_np.shape}."
                             )
+
+                        # Keep the complete execution horizon for visualization.
+                        # The queue stores normalized actions, so postprocess its
+                        # remaining entries before combining them with the
+                        # already-postprocessed action returned above.
+                        if queue_was_empty:
+                            queued_actions = list(policy._action_queue)
+                            if queued_actions:
+                                queued = torch.cat(queued_actions, dim=0)
+                                with torch.inference_mode():
+                                    queued = postprocessor(queued)
+                                queued_np = queued.detach().cpu().numpy().astype(
+                                    np.float32, copy=False
+                                )
+                                action_plan = np.concatenate(
+                                    (
+                                        action_np.reshape(1, action_dim),
+                                        queued_np.reshape(-1, action_dim),
+                                    ),
+                                    axis=0,
+                                )
+                            else:
+                                action_plan = action_np.reshape(1, action_dim)
+                            action_plan_index = 0
+                        else:
+                            action_plan_index += 1
+
                         _send_message(
                             connection,
                             {
-                                "action": np.ascontiguousarray(action_np),
+                                # Keep the socket protocol independent of the
+                                # NumPy versions installed in the server and
+                                # Isaac Lab environments.
+                                "action": action_np.tolist(),
+                                "action_plan": action_plan.tolist(),
+                                "action_plan_index": action_plan_index,
                                 "inference_s": time.perf_counter() - start,
                             },
                         )
