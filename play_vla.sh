@@ -8,9 +8,9 @@ LEROBOT_ROOT="${LEROBOT_ROOT:-${QUADLOCO_ROOT}/third_party/lerobot}"
 LEROBOT_PYTHON="${LEROBOT_PYTHON:-$(command -v python)}"
 ISAACLAB_PYTHON="${ISAACLAB_PYTHON:-$(command -v python)}"
 
-VLA_CHECKPOINT="${VLA_CHECKPOINT:-${QUADLOCO_ROOT}/outputs/pi05_quadloco_rgbd_object_relative_small_1epoch_pairwise_add_16x16/checkpoints/last/pretrained_model}"
+VLA_CHECKPOINT="${VLA_CHECKPOINT:-${QUADLOCO_ROOT}/outputs/pi05_quadloco_rgb_all_1500_1epoch_clean_rgb_direct_velocity/checkpoints/last/pretrained_model}"
 LOCOMOTION_CHECKPOINT="${LOCOMOTION_CHECKPOINT:-${QUADLOCO_ROOT}/ckpt/model_999.pt}"
-TASK="${TASK:-Unitree-Go2-Quadloco-ManagerBased-Rough-ObjectRelative-DataCollection-v0}"
+TASK="${TASK:-Unitree-Go2-Quadloco-ManagerBased-Rough-Direct-DataCollection-v0}"
 VLA_HOST="${VLA_HOST:-127.0.0.1}"
 VLA_PORT="${VLA_PORT:-5555}"
 VLA_DEVICE="${VLA_DEVICE:-cuda}"
@@ -84,5 +84,5 @@ echo "[INFO] Starting Quadloco VLA playback."
     --num_envs 1 \
     --vla_host "${VLA_HOST}" \
     --vla_port "${VLA_PORT}" \
-    --waypoint_vis vla
+    --waypoint_vis none \
     "$@"

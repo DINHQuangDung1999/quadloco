@@ -62,6 +62,15 @@ class PI05Config(PreTrainedConfig):
     empty_cameras: int = 0
 
     tokenizer_max_length: int = 200  # see openpi `__post_init__`
+    # Disable to condition PI0.5 only on vision and the natural-language task.
+    state_enabled: bool = True
+    # Optionally expose only a leading subset of the recorded state to the
+    # tokenizer. Quadloco uses 42 to exclude the final 3D oracle velocity
+    # command from its recorded 45D policy observation.
+    state_token_dim: int | None = None
+    # Semantic action interface used by Quadloco. ``auto`` preserves
+    # compatibility with older checkpoints whose mode is inferred from shape.
+    action_mode: str = "auto"
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
@@ -136,6 +145,25 @@ class PI05Config(PreTrainedConfig):
         if self.dtype not in ["bfloat16", "float32"]:
             raise ValueError(f"Invalid dtype: {self.dtype}")
 
+        if self.action_mode not in ("auto", "waypoint", "direct_velocity"):
+            raise ValueError(
+                "action_mode must be 'auto', 'waypoint', or 'direct_velocity', "
+                f"got {self.action_mode!r}"
+            )
+
+        if self.state_token_dim is not None and self.state_token_dim <= 0:
+            raise ValueError("state_token_dim must be positive when provided")
+        if (
+            self.state_enabled
+            and self.state_token_dim is not None
+            and OBS_STATE in (self.input_features or {})
+            and self.state_token_dim > self.input_features[OBS_STATE].shape[0]
+        ):
+            raise ValueError(
+                f"state_token_dim={self.state_token_dim} exceeds recorded state dimension "
+                f"{self.input_features[OBS_STATE].shape[0]}"
+            )
+
         if self.depth_enabled:
             if self.depth_fusion_mode not in ("concatenate", "pairwise_add", "cross_attention"):
                 raise ValueError(
@@ -177,7 +205,7 @@ class PI05Config(PreTrainedConfig):
             )
             self.input_features[key] = empty_camera
 
-        if OBS_STATE not in self.input_features:
+        if self.state_enabled and OBS_STATE not in self.input_features:
             state_feature = PolicyFeature(
                 type=FeatureType.STATE,
                 shape=(self.max_state_dim,),  # Padded to max_state_dim

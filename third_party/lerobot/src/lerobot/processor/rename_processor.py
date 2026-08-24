@@ -86,8 +86,18 @@ def rename_stats(stats: dict[str, dict[str, Any]], rename_map: dict[str, str]) -
     """
     if not stats:
         return {}
+    # A mapped source must win when its destination already exists in the
+    # dataset.  This is important when promoting an observation to ``action``:
+    # keeping the recorded action stats would give the new target statistics
+    # with the wrong dimensionality.  First retain only keys that are not
+    # destinations, then apply mapped sources last.
+    destinations = set(rename_map.values())
     renamed: dict[str, dict[str, Any]] = {}
     for old_key, sub_stats in stats.items():
-        new_key = rename_map.get(old_key, old_key)
-        renamed[new_key] = deepcopy(sub_stats) if sub_stats is not None else {}
+        if old_key not in destinations and old_key not in rename_map:
+            renamed[old_key] = deepcopy(sub_stats) if sub_stats is not None else {}
+    for old_key, new_key in rename_map.items():
+        if old_key in stats:
+            sub_stats = stats[old_key]
+            renamed[new_key] = deepcopy(sub_stats) if sub_stats is not None else {}
     return renamed

@@ -180,6 +180,11 @@ def update_policy(
 
     train_metrics.loss = loss.item()
     train_metrics.grad_norm = grad_norm.item()
+    if grad_clip_norm > 0:
+        output_dict["optimization/grad_was_clipped"] = float(grad_norm.item() > grad_clip_norm)
+        output_dict["optimization/grad_clip_scale"] = min(
+            1.0, grad_clip_norm / max(grad_norm.item(), 1e-12)
+        )
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
     return train_metrics, output_dict
@@ -307,6 +312,13 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         processor_kwargs["preprocessor_overrides"]["rename_observations_processor"] = {
             "rename_map": cfg.rename_map
         }
+        if cfg.policy.type == "pi05":
+            processor_kwargs["preprocessor_overrides"][
+                "pi05_prepare_state_tokenizer_processor_step"
+            ] = {
+                "state_enabled": cfg.policy.state_enabled,
+                "state_token_dim": cfg.policy.state_token_dim,
+            }
         postprocessor_kwargs["postprocessor_overrides"] = {
             "unnormalizer_processor": {
                 "stats": dataset_stats,
@@ -491,7 +503,23 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
                 if output_dict:
-                    wandb_log_dict.update(output_dict)
+                    output_for_logging = dict(output_dict)
+                    loss_per_dim = output_for_logging.pop("loss_per_dim", None)
+                    if loss_per_dim is not None:
+                        action_mode = getattr(cfg.policy, "action_mode", "auto")
+                        if action_mode == "direct_velocity" and len(loss_per_dim) == 3:
+                            dim_names = ("vx", "vy", "wz")
+                        elif action_mode == "waypoint" and len(loss_per_dim) == 2:
+                            dim_names = ("x", "y")
+                        else:
+                            dim_names = tuple(str(index) for index in range(len(loss_per_dim)))
+                        output_for_logging.update(
+                            {
+                                f"loss/action_{name}": float(value)
+                                for name, value in zip(dim_names, loss_per_dim, strict=True)
+                            }
+                        )
+                    wandb_log_dict.update(output_for_logging)
                 # Log RA-BC statistics if enabled
                 if rabc_weights is not None:
                     rabc_stats = rabc_weights.get_stats()

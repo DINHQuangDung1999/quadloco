@@ -229,6 +229,14 @@ def main() -> None:
     action_dim = policy_cfg.output_features["action"].shape[0]
     if action_dim not in (2, 3):
         raise ValueError(f"Expected a 2D waypoint or 3D velocity action, received {action_dim}D.")
+    action_mode = getattr(policy_cfg, "action_mode", "auto")
+    if action_mode in ("waypoint", "direct_velocity"):
+        expected_action_dim = 2 if action_mode == "waypoint" else 3
+        if action_dim != expected_action_dim:
+            raise ValueError(
+                f"Checkpoint action_mode={action_mode!r} requires {expected_action_dim}D actions, "
+                f"but its action feature is {action_dim}D."
+            )
     policy_cfg.device = str(device)
     policy_class = get_policy_class(policy_cfg.type)
 

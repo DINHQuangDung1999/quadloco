@@ -5,10 +5,9 @@
 
 """Play a hierarchical PI0.5 + RSL-RL policy in the Quadloco navigation task.
 
-PI0.5 receives front RGB-D, proprioception, and the goal instruction. It
-produces a robot-frame waypoint ``[x_forward, y_left]``. A deterministic
-adapter converts the waypoint to ``[vx, vy, wz]`` for the pretrained RSL-RL
-locomotion policy.
+PI0.5 receives camera input, proprioception, and the goal instruction. It may
+produce either a robot-frame waypoint ``[x_forward, y_left]`` or a direct
+velocity command ``[vx, vy, wz]`` for the pretrained RSL-RL locomotion policy.
 
 Launch ``scripts/pi05_velocity_server.py`` from the LeRobot Python 3.12
 environment before launching this script from the Isaac Lab environment.
@@ -157,14 +156,13 @@ class WaypointVLAClient:
         if "error" in response:
             raise RuntimeError(f"PI0.5 server failed: {response['error']}")
         action = np.asarray(response["action"], dtype=np.float32)
-        if action.shape != (2,):
-            raise ValueError(
-                f"Expected VLA waypoint [x_forward, y_left], received shape {action.shape}."
-            )
+        if action.shape not in ((2,), (3,)):
+            raise ValueError(f"Expected a 2D waypoint or 3D velocity, received {action.shape}.")
         action_plan = np.asarray(response["action_plan"], dtype=np.float32)
-        if action_plan.ndim != 2 or action_plan.shape[1] != 2:
+        if action_plan.ndim != 2 or action_plan.shape[1] != action.shape[0]:
             raise ValueError(
-                f"Expected VLA action plan with shape (N, 2), received {action_plan.shape}."
+                f"Expected VLA action plan with shape (N, {action.shape[0]}), "
+                f"received {action_plan.shape}."
             )
         action_plan_index = int(response["action_plan_index"])
         if not 0 <= action_plan_index < len(action_plan):
@@ -365,26 +363,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             rgb = _rgb_frame(obs["camera"]["rgb"][0])
             depth_z16 = _depth_z16_frame(obs["camera"]["depth"][0], depth_scale=0.001)
             state = obs["policy"][0].detach().cpu().numpy().astype(np.float32, copy=False)
-            waypoint_np, _action_plan_np, _action_plan_index, inference_s = vla_client.predict(
+            policy_action_np, _action_plan_np, _action_plan_index, inference_s = vla_client.predict(
                 rgb, depth_z16, 0.001, state, task, reset_vla
             )
             reset_vla = False
 
             ground_z = env.unwrapped.scene.env_origins[0, 2] + 0.05
-            if show_vla:
+            if show_vla and policy_action_np.shape == (2,):
                 waypoint_b = torch.zeros(
                     (1, 3),
                     dtype=command_term.robot.data.root_pos_w.dtype,
                     device=command_term.robot.data.root_pos_w.device,
                 )
                 waypoint_b[0, :2] = torch.as_tensor(
-                    waypoint_np, dtype=waypoint_b.dtype, device=waypoint_b.device
+                    policy_action_np, dtype=waypoint_b.dtype, device=waypoint_b.device
                 )
                 waypoint_w = command_term.robot.data.root_pos_w[0:1] + quat_apply(
                     yaw_quat(command_term.robot.data.root_quat_w[0:1]), waypoint_b
                 )
                 waypoint_w[:, 2] = ground_z
                 vla_waypoint_visualizer.visualize(translations=waypoint_w)
+            elif show_vla:
+                # A direct velocity is not a spatial waypoint, so displaying
+                # it as a world-frame marker would be misleading.
+                vla_waypoint_visualizer.set_visibility(False)
 
             if show_astar:
                 # Red: all intermediate A* points; orange: active point;
@@ -418,15 +420,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     route_entry_visualizer.set_visibility(False)
                     route_exit_visualizer.set_visibility(False)
 
-            velocity_np = waypoint_to_velocity(
-                waypoint_np,
-                forward_velocity=command_term.cfg.forward_velocity,
-                yaw_gain=command_term.cfg.yaw_gain,
-                max_yaw_rate=command_term.cfg.max_yaw_rate,
-                goal_tolerance=command_term.cfg.goal_tolerance,
-                slowdown_distance=command_term.cfg.slowdown_distance,
-                minimum_approach_velocity=command_term.cfg.minimum_approach_velocity,
-            )
+            if policy_action_np.shape == (2,):
+                velocity_np = waypoint_to_velocity(
+                    policy_action_np,
+                    forward_velocity=command_term.cfg.forward_velocity,
+                    yaw_gain=command_term.cfg.yaw_gain,
+                    max_yaw_rate=command_term.cfg.max_yaw_rate,
+                    goal_tolerance=command_term.cfg.goal_tolerance,
+                    slowdown_distance=command_term.cfg.slowdown_distance,
+                    minimum_approach_velocity=command_term.cfg.minimum_approach_velocity,
+                )
+                action_text = (
+                    f"waypoint=[{policy_action_np[0]:+.3f}, {policy_action_np[1]:+.3f}]"
+                )
+            else:
+                velocity_np = policy_action_np
+                action_text = (
+                    f"direct_velocity=[{policy_action_np[0]:+.3f}, "
+                    f"{policy_action_np[1]:+.3f}, {policy_action_np[2]:+.3f}]"
+                )
 
             limits = np.asarray([args_cli.max_vx, args_cli.max_vy, args_cli.max_wz], dtype=np.float32)
             velocity_np = np.clip(velocity_np, -limits, limits)
@@ -457,7 +469,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if timestep % args_cli.print_freq == 0:
                 print(
                     f"[VLA] step={timestep} task={task!r} "
-                    f"waypoint=[{waypoint_np[0]:+.3f}, {waypoint_np[1]:+.3f}] "
+                    f"{action_text} "
                     f"command=[{velocity_np[0]:+.3f}, {velocity_np[1]:+.3f}, {velocity_np[2]:+.3f}] "
                     f"server_s={inference_s:.3f}"
                 )

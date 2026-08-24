@@ -483,6 +483,15 @@ def make_policy(
         features = renamed_features
 
     cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
+    action_mode = getattr(cfg, "action_mode", "auto")
+    if action_mode in ("waypoint", "direct_velocity"):
+        expected_action_dim = 2 if action_mode == "waypoint" else 3
+        actual_action_dim = cfg.output_features[ACTION].shape[0]
+        if actual_action_dim != expected_action_dim:
+            raise ValueError(
+                f"action_mode={action_mode!r} requires a {expected_action_dim}D action, "
+                f"but the configured action is {actual_action_dim}D"
+            )
     if not cfg.input_features:
         cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
     kwargs["config"] = cfg

@@ -16,14 +16,33 @@ BATCH_SIZE="${BATCH_SIZE:-2}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 SAVE_FREQ="${SAVE_FREQ:-100000}"
 TRAIN_EXPERT_ONLY="${TRAIN_EXPERT_ONLY:-true}"
+GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-false}"
 DEPTH_TOKEN_GRID="${DEPTH_TOKEN_GRID:-[8,8]}"
 DEPTH_FUSION_MODE="${DEPTH_FUSION_MODE:-cross_attention}"
 DEPTH_MAX="${DEPTH_MAX:-20.0}"
 PUSH_MODEL_TO_HUB="${PUSH_MODEL_TO_HUB:-false}"
 WANDB_ENABLE="${WANDB_ENABLE:-true}"
-ACTION_REPRESENTATION="${ACTION_REPRESENTATION:-waypoint}"
+ACTION_MODE="${ACTION_MODE:-${ACTION_REPRESENTATION:-waypoint}}"
+STATE_MODE="${STATE_MODE:-vision_language_only}"
 
-case "${ACTION_REPRESENTATION}" in
+case "${STATE_MODE}" in
+    vision_language_only)
+        INPUT_FEATURES='{"observation.images.camera1":{"type":"VISUAL","shape":[3,480,640]},"observation.depth.camera1":{"type":"VISUAL","shape":[1,96,128]}}'
+        STATE_ENABLED=false
+        STATE_TOKEN_DIM=null
+        ;;
+    proprioceptive_42d)
+        INPUT_FEATURES='{"observation.state":{"type":"STATE","shape":[45]},"observation.images.camera1":{"type":"VISUAL","shape":[3,480,640]},"observation.depth.camera1":{"type":"VISUAL","shape":[1,96,128]}}'
+        STATE_ENABLED=true
+        STATE_TOKEN_DIM=42
+        ;;
+    *)
+        echo "STATE_MODE must be vision_language_only or proprioceptive_42d" >&2
+        exit 1
+        ;;
+esac
+
+case "${ACTION_MODE}" in
     waypoint)
         OUTPUT_FEATURES='{"action":{"type":"ACTION","shape":[2]}}'
         RENAME_MAP='{}'
@@ -35,7 +54,7 @@ case "${ACTION_REPRESENTATION}" in
         JOB_NAME="pi05_quadloco_rgbd_direct_velocity"
         ;;
     *)
-        echo "ACTION_REPRESENTATION must be waypoint or direct_velocity" >&2
+        echo "ACTION_MODE must be waypoint or direct_velocity" >&2
         exit 1
         ;;
 esac
@@ -70,12 +89,15 @@ exec "${LEROBOT_PYTHON}" "${LEROBOT_ROOT}/src/lerobot/scripts/lerobot_train.py" 
     --policy.pretrained_path="${BASE_MODEL}" \
     --policy.repo_id="${MODEL_REPO}" \
     --policy.push_to_hub="${PUSH_MODEL_TO_HUB}" \
-    --policy.input_features='{"observation.state":{"type":"STATE","shape":[45]},"observation.images.camera1":{"type":"VISUAL","shape":[3,480,640]},"observation.depth.camera1":{"type":"VISUAL","shape":[1,96,128]}}' \
+    --policy.input_features="${INPUT_FEATURES}" \
+    --policy.state_enabled="${STATE_ENABLED}" \
+    --policy.state_token_dim="${STATE_TOKEN_DIM}" \
+    --policy.action_mode="${ACTION_MODE}" \
     --policy.output_features="${OUTPUT_FEATURES}" \
     --rename_map="${RENAME_MAP}" \
     --policy.device=cuda \
     --policy.dtype=bfloat16 \
-    --policy.gradient_checkpointing=false \
+    --policy.gradient_checkpointing="${GRADIENT_CHECKPOINTING}" \
     --policy.compile_model=false \
     --policy.freeze_vision_encoder=true \
     --policy.train_expert_only="${TRAIN_EXPERT_ONLY}" \

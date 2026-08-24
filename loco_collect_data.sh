@@ -36,8 +36,8 @@
 #     # --lerobot_include_depth \
 #     # --headless
 
-# declare -A EPISODES=(  [near_far]=150     [object_relative]=150 )
-# for TASK in occluded near_far object_relative; do
+# declare -A EPISODES=([relational]=200)
+# for TASK in relational; do
 #     python scripts/quadloco_rsl_rl/run_data_collection.py \
 #     --navigation_mode "$TASK"  \
 #     --num_envs 1   \
@@ -56,12 +56,12 @@
 export HF_LEROBOT_HOME=/home/summerschool/summerschool_ws/Dataset
 
 lerobot-edit-dataset \
-    --repo_id DinhQuangDung/quadloco-vla-all-rgbd-clean \
+    --repo_id DinhQuangDung/quadloco-vla-all-rgbd-small \
     --operation.type merge \
     --operation.repo_ids "[
-        'DinhQuangDung/quadloco-vla-direct-rgbd-clean',
-        'DinhQuangDung/quadloco-vla-occluded-rgbd-clean',
-        'DinhQuangDung/quadloco-vla-relational-rgbd-clean',
-        'DinhQuangDung/quadloco-vla-near_far-rgbd-clean',
-        'DinhQuangDung/quadloco-vla-object_relative-rgbd-clean'
+        'DinhQuangDung/quadloco-vla-direct-rgbd-small',
+        'DinhQuangDung/quadloco-vla-occluded-rgbd-small',
+        'DinhQuangDung/quadloco-vla-relational-rgbd-small',
+        'DinhQuangDung/quadloco-vla-near_far-rgbd-small',
+        'DinhQuangDung/quadloco-vla-object_relative-rgbd-small'
     ]"
