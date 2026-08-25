@@ -227,6 +227,9 @@ def main() -> None:
     device = torch.device(args.device)
     policy_cfg = _load_policy_config_compat(checkpoint)
     action_dim = policy_cfg.output_features["action"].shape[0]
+    state_feature = policy_cfg.input_features.get("observation.state")
+    state_dim = 0 if state_feature is None else int(state_feature.shape[0])
+    depth_enabled = "observation.depth.camera1" in policy_cfg.input_features
     if action_dim not in (2, 3):
         raise ValueError(f"Expected a 2D waypoint or 3D velocity action, received {action_dim}D.")
     action_mode = getattr(policy_cfg, "action_mode", "auto")
@@ -266,6 +269,18 @@ def main() -> None:
                 try:
                     while True:
                         request = _recv_message(connection)
+                        if request.get("op") == "describe":
+                            _send_message(
+                                connection,
+                                {
+                                    "action_dim": action_dim,
+                                    "action_mode": action_mode,
+                                    "state_dim": state_dim,
+                                    "state_token_dim": getattr(policy_cfg, "state_token_dim", None),
+                                    "depth_enabled": depth_enabled,
+                                },
+                            )
+                            continue
                         if request.get("reset", False):
                             policy.reset()
                             action_plan = None
