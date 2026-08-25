@@ -107,6 +107,12 @@ class UniformGoalVelocityCommandOccluded(UniformGoalVelocityCommandDirect):
                 shape=shape,
                 obstacle_type=obstacle_type,
             )
+            self.task_specs[env_id] = {
+                "shape_index": marker_index // num_colors,
+                "color_index": marker_index % num_colors,
+                "obstacle_variant": int(self.obstacle_variant_indices[env_id].item()),
+            }
+            self._forced_task_specs[env_id] = None
 
         self._show_only_goal_asset(env_ids)
         self._update_occlusion_obstacle_poses(env_ids)
@@ -172,6 +178,10 @@ class UniformGoalVelocityCommandOccluded(UniformGoalVelocityCommandDirect):
         self.obstacle_variant_indices[env_ids] = torch.randint(
             len(self.obstacle_variants), size=(len(env_ids),), device=self.device
         )
+        for env_id in env_ids.tolist():
+            forced = self._forced_task_specs[env_id]
+            if forced is not None:
+                self.obstacle_variant_indices[env_id] = int(forced["obstacle_variant"])
         obstacle_sizes = torch.tensor(
             self.cfg.obstacle_footprints, device=self.device
         )[self.obstacle_variant_indices[env_ids]]
@@ -336,7 +346,7 @@ class UniformGoalVelocityCommandOccluded(UniformGoalVelocityCommandDirect):
             final_distance_scale,
         )
         self._waypoint_to_velocity(distance_scale)
-        self.velocity_command[self.goal_reached] = 0.0
+        self._stop_at_reached_goals()
 
 
 
@@ -423,4 +433,3 @@ class OccludedGoalVelocityCommandCfg(UniformGoalVelocityCommandCfg):
             raise ValueError("astar_planning_margin must be positive.")
         if self.astar_max_waypoints <= 0:
             raise ValueError("astar_max_waypoints must be positive.")
-

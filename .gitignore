@@ -77,3 +77,6 @@ tests/
 .vscode/browse.vc.db*
 */browse.vc.db
 /eval_results/
+/*.png
+/*.pdf
+/*.ipynb

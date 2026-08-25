@@ -104,21 +104,44 @@ class UniformGoalVelocityCommandRelational(UniformGoalVelocityCommandDirect):
         ).uniform_(-self.cfg.target_y_jitter, self.cfg.target_y_jitter)
 
         for row, env_id in enumerate(env_ids.tolist()):
-            shared_variant = int(
-                torch.randint(num_variants, (1,), device=self.device).item()
+            forced = self._forced_task_specs[env_id]
+            shared_variant = (
+                int(forced["shared_variant"])
+                if forced is not None
+                else int(torch.randint(num_variants, (1,), device=self.device).item())
             )
-            selected_groups = torch.randperm(
-                len(self.reference_variant_groups), device=self.device
-            )[:2].tolist()
-            reference_variants = [
-                group[
-                    int(torch.randint(len(group), (1,), device=self.device).item())
-                ]
-                for group in (
-                    self.reference_variant_groups[index] for index in selected_groups
-                )
-            ]
             selected_pair = int(torch.randint(2, (1,), device=self.device).item())
+            if forced is None:
+                selected_groups = torch.randperm(
+                    len(self.reference_variant_groups), device=self.device
+                )[:2].tolist()
+                reference_variants = [
+                    group[int(torch.randint(len(group), (1,), device=self.device).item())]
+                    for group in (
+                        self.reference_variant_groups[index] for index in selected_groups
+                    )
+                ]
+            else:
+                selected_reference = int(forced["selected_reference"])
+                selected_group = next(
+                    index
+                    for index, group in enumerate(self.reference_variant_groups)
+                    if selected_reference in group
+                )
+                other_groups = [
+                    index
+                    for index in range(len(self.reference_variant_groups))
+                    if index != selected_group
+                ]
+                other_group = other_groups[
+                    int(torch.randint(len(other_groups), (1,), device=self.device).item())
+                ]
+                other_variants = self.reference_variant_groups[other_group]
+                other_reference = other_variants[
+                    int(torch.randint(len(other_variants), (1,), device=self.device).item())
+                ]
+                reference_variants = [other_reference, other_reference]
+                reference_variants[selected_pair] = selected_reference
 
             origin = self._env.scene.env_origins[env_id]
             target_positions = torch.zeros(2, 3, device=self.device)
@@ -162,6 +185,11 @@ class UniformGoalVelocityCommandRelational(UniformGoalVelocityCommandDirect):
                 shape=target_shape,
                 reference_object=self.cfg.reference_instruction_names[selected_reference],
             )
+            self.task_specs[env_id] = {
+                "shared_variant": shared_variant,
+                "selected_reference": selected_reference,
+            }
+            self._forced_task_specs[env_id] = None
 
             single_env_id = torch.tensor([env_id], device=self.device)
             for slot, slot_assets in enumerate(self.relational_target_assets):
@@ -292,4 +320,3 @@ class RelationalGoalVelocityCommandCfg(UniformGoalVelocityCommandCfg):
             raise ValueError("pair_center_y_jitter must be nonnegative.")
         if self.target_y_jitter < 0.0:
             raise ValueError("target_y_jitter must be nonnegative.")
-

@@ -14,6 +14,7 @@ def waypoint_to_velocity(
     goal_tolerance: float,
     slowdown_distance: float,
     minimum_approach_velocity: float = 0.0,
+    local_waypoint_radius: float = 1.5,
 ) -> np.ndarray:
     """Convert ``[x_forward, y_left]`` into ``[vx, vy, wz]``.
 
@@ -32,8 +33,15 @@ def waypoint_to_velocity(
         raise ValueError(
             "Expected 0 <= minimum_approach_velocity <= forward_velocity."
         )
+    if local_waypoint_radius < slowdown_distance:
+        raise ValueError(
+            "local_waypoint_radius must be greater than or equal to slowdown_distance."
+        )
 
     distance = float(np.linalg.norm(waypoint))
+    if distance > local_waypoint_radius:
+        waypoint = waypoint * (local_waypoint_radius / distance)
+        distance = local_waypoint_radius
     if distance < goal_tolerance:
         return np.zeros(3, dtype=np.float32)
 

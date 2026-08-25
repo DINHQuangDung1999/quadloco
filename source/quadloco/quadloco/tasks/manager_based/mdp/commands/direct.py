@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from copy import deepcopy
 from dataclasses import MISSING
 from typing import TYPE_CHECKING
 
@@ -125,6 +126,8 @@ class UniformGoalVelocityCommandDirect(CommandTerm):
             self.num_envs, 1, dtype=torch.int32, device=self.device
         )
         self.goal_task_names = [""] * self.num_envs
+        self.task_specs: list[dict | None] = [None] * self.num_envs
+        self._forced_task_specs: list[dict | None] = [None] * self.num_envs
         self.candidate_assets = [
             self._env.scene[f"{self.cfg.candidate_asset_prefix}_{shape}_{color}"]
             for shape in self.cfg.marker_shapes
@@ -138,6 +141,20 @@ class UniformGoalVelocityCommandDirect(CommandTerm):
     def command(self) -> torch.Tensor:
         """Return the scripted ``[vx, vy, wz]`` command for each environment."""
         return self.velocity_command
+
+    def get_task_spec(self, env_id: int) -> dict:
+        """Return the semantic choices needed to repeat an instruction."""
+        spec = self.task_specs[env_id]
+        if spec is None:
+            raise RuntimeError(f"Environment {env_id} has no sampled task specification.")
+        return deepcopy(spec)
+
+    def retry_task_spec(self, env_id: int, task_spec: dict) -> None:
+        """Regenerate one scene while preserving its prior instruction."""
+        self._forced_task_specs[env_id] = deepcopy(task_spec)
+        env_ids = torch.tensor([env_id], device=self.device, dtype=torch.long)
+        self._resample(env_ids)
+        self._update_command()
 
     def set_goal(self, goal_pos_w: torch.Tensor, env_ids: Sequence[int] | torch.Tensor | None = None):
         """Set externally supplied world-frame goals, for example from an object detector."""
@@ -233,12 +250,29 @@ class UniformGoalVelocityCommandDirect(CommandTerm):
             )
 
         for row, env_id in enumerate(env_ids.tolist()):
-            color_indices = torch.randperm(num_colors, device=self.device)[:num_candidates]
-            shape_indices = torch.randperm(num_shapes, device=self.device)[:num_candidates]
+            forced = self._forced_task_specs[env_id]
+            goal_candidate = int(goal_candidate_indices[row].item())
+            if forced is None:
+                color_indices = torch.randperm(num_colors, device=self.device)[:num_candidates]
+                shape_indices = torch.randperm(num_shapes, device=self.device)[:num_candidates]
+            else:
+                forced_shape = int(forced["shape_index"])
+                forced_color = int(forced["color_index"])
+                shape_values = [i for i in range(num_shapes) if i != forced_shape]
+                color_values = [i for i in range(num_colors) if i != forced_color]
+                shape_values.insert(goal_candidate, forced_shape)
+                color_values.insert(goal_candidate, forced_color)
+                shape_indices = torch.tensor(
+                    shape_values,
+                    device=self.device,
+                )
+                color_indices = torch.tensor(
+                    color_values,
+                    device=self.device,
+                )[:num_candidates]
             marker_indices = shape_indices * num_colors + color_indices
             self.candidate_marker_indices[env_id] = marker_indices.to(torch.int32)
 
-            goal_candidate = int(goal_candidate_indices[row].item())
             goal_marker = int(marker_indices[goal_candidate].item())
             self.marker_indices[env_id] = goal_marker
             goal_shape = self.cfg.marker_shapes[int(shape_indices[goal_candidate].item())]
@@ -247,6 +281,12 @@ class UniformGoalVelocityCommandDirect(CommandTerm):
                 color=goal_color,
                 shape=goal_shape,
             )
+            self.task_specs[env_id] = {
+                "shape_index": int(shape_indices[goal_candidate].item()),
+                "color_index": int(color_indices[goal_candidate].item()),
+            }
+            if type(self) is UniformGoalVelocityCommandDirect:
+                self._forced_task_specs[env_id] = None
 
         self._update_candidate_asset_poses(env_ids)
 
@@ -278,7 +318,7 @@ class UniformGoalVelocityCommandDirect(CommandTerm):
         self.goal_pos_b[:] = target_vec_b[:, :2]
         self.waypoint_command[:] = self.goal_pos_b
         distance = torch.linalg.vector_norm(self.goal_pos_b, dim=-1)
-        self.goal_reached[:] = distance < self.cfg.goal_tolerance
+        self._update_goal_reached(distance)
 
         distance_scale = torch.clamp(
             (distance - self.cfg.goal_tolerance) / (self.cfg.slowdown_distance - self.cfg.goal_tolerance),
@@ -286,10 +326,50 @@ class UniformGoalVelocityCommandDirect(CommandTerm):
             max=1.0,
         )
         self._waypoint_to_velocity(distance_scale)
+        self._stop_at_reached_goals()
+
+    def _update_goal_reached(
+        self, distance: torch.Tensor, eligible: torch.Tensor | None = None
+    ) -> None:
+        """Update goal completion with optional positional hysteresis."""
+        if eligible is None:
+            eligible = torch.ones_like(self.goal_reached)
+        release_tolerance = self.cfg.goal_release_tolerance
+        if release_tolerance is None:
+            release_tolerance = self.cfg.goal_tolerance
+        threshold = torch.where(
+            self.goal_reached,
+            torch.full_like(distance, release_tolerance),
+            torch.full_like(distance, self.cfg.goal_tolerance),
+        )
+        self.goal_reached[:] = eligible & (distance < threshold)
+
+    def _stop_at_reached_goals(self) -> None:
+        """Make the high- and low-level commands agree at a completed goal.
+
+        ``waypoint_command`` is the action recorded for PI0.5 training.  A
+        reached goal must therefore emit a zero waypoint as well as a zero
+        velocity; otherwise stopped demonstration frames supervise continued
+        displacement toward a target that the expert no longer pursues.
+        """
+        self.waypoint_command[self.goal_reached] = 0.0
         self.velocity_command[self.goal_reached] = 0.0
+        self.heading_error[self.goal_reached] = 0.0
 
     def _waypoint_to_velocity(self, distance_scale: torch.Tensor) -> None:
         """Deterministically convert the active waypoint for the low-level policy."""
+        # Expose a bounded local target to both the controller and the dataset.
+        # Route transitions and success checks continue to use their true
+        # world-frame targets, so clipping does not alter planner progress.
+        waypoint_distance = torch.linalg.vector_norm(
+            self.waypoint_command, dim=-1, keepdim=True
+        )
+        waypoint_scale = torch.clamp(
+            self.cfg.local_waypoint_radius
+            / torch.clamp(waypoint_distance, min=1.0e-6),
+            max=1.0,
+        )
+        self.waypoint_command.mul_(waypoint_scale)
         self.heading_error[:] = torch.atan2(
             self.waypoint_command[:, 1], self.waypoint_command[:, 0]
         )
@@ -379,12 +459,18 @@ class UniformGoalVelocityCommandCfg(CommandTermCfg):
 
     asset_name: str = MISSING
     goal_tolerance: float = 0.2
+    # Optional distance at which an already reached goal is released. Values
+    # above goal_tolerance prevent small inertial drift from resetting dwell.
+    goal_release_tolerance: float | None = None
     marker_height: float = 0.15
     forward_velocity: float = 0.4
     minimum_approach_velocity: float = 0.0
     yaw_gain: float = 1.5
     max_yaw_rate: float = 0.8
     slowdown_distance: float = 0.75
+    # Maximum norm of the robot-frame waypoint exposed to PI0.5. The true
+    # world goal and route waypoints remain unmodified.
+    local_waypoint_radius: float = 1.5
     marker_shapes: tuple[str, ...] = ("pyramid", "cube", "sphere")
     marker_colors: tuple[str, ...] = ("red", "green", "blue")
     task_template: str = "Navigate to the {color} {shape}"
@@ -448,9 +534,18 @@ class UniformGoalVelocityCommandCfg(CommandTermCfg):
             raise ValueError("candidate_y_spacing_error must be nonnegative.")
         if self.slowdown_distance <= self.goal_tolerance:
             raise ValueError("slowdown_distance must be greater than goal_tolerance.")
+        if (
+            self.goal_release_tolerance is not None
+            and self.goal_release_tolerance < self.goal_tolerance
+        ):
+            raise ValueError(
+                "goal_release_tolerance must be greater than or equal to goal_tolerance."
+            )
+        if self.local_waypoint_radius < self.slowdown_distance:
+            raise ValueError(
+                "local_waypoint_radius must be greater than or equal to slowdown_distance."
+            )
         if not 0.0 <= self.minimum_approach_velocity <= self.forward_velocity:
             raise ValueError(
                 "minimum_approach_velocity must be between zero and forward_velocity."
             )
-
-

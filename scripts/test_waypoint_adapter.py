@@ -49,3 +49,10 @@ def test_minimum_approach_velocity_overcomes_policy_dead_zone():
         np.array([0.24, 0.0]), minimum_approach_velocity=0.15, **PARAMS
     )
     np.testing.assert_allclose(stopped, np.zeros(3))
+
+
+def test_local_waypoint_radius_must_cover_slowdown_region():
+    with np.testing.assert_raises_regex(ValueError, "local_waypoint_radius"):
+        waypoint_to_velocity(
+            np.array([2.0, 0.0]), local_waypoint_radius=0.5, **PARAMS
+        )

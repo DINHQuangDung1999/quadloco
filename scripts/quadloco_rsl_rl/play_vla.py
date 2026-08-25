@@ -429,6 +429,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     goal_tolerance=command_term.cfg.goal_tolerance,
                     slowdown_distance=command_term.cfg.slowdown_distance,
                     minimum_approach_velocity=command_term.cfg.minimum_approach_velocity,
+                    local_waypoint_radius=command_term.cfg.local_waypoint_radius,
                 )
                 action_text = (
                     f"waypoint=[{policy_action_np[0]:+.3f}, {policy_action_np[1]:+.3f}]"

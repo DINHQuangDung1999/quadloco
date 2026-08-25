@@ -57,6 +57,12 @@ parser.add_argument(
 )
 parser.add_argument("--num_episodes", type=int, default=10, help="Number of trajectories to collect.")
 parser.add_argument(
+    "--collision_force_threshold",
+    type=float,
+    default=1.0,
+    help="Reject an episode when a non-foot contact force exceeds this threshold.",
+)
+parser.add_argument(
     "--dataset_dir",
     type=str,
     default="datasets/goal_navigation",
@@ -495,12 +501,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # observes ``done``; reading goal_task_names afresh on every frame can then
     # attach one frame of the next instruction to the episode being saved.
     episode_tasks: list[str | None] = [None] * num_envs
+    episode_task_specs: list[dict | None] = [None] * num_envs
     episode_task_changed = torch.zeros(
         num_envs, dtype=torch.bool, device=env.unwrapped.device
     )
     episode_goal_reached = torch.zeros(
         num_envs, dtype=torch.bool, device=env.unwrapped.device
     )
+    episode_collision = torch.zeros(
+        num_envs, dtype=torch.bool, device=env.unwrapped.device
+    )
+    contact_sensor = env.unwrapped.scene.sensors["contact_forces"]
+    collision_body_ids = [
+        index
+        for index, name in enumerate(contact_sensor.body_names)
+        if "foot" not in name.lower()
+    ]
     num_collected = 0
     collect_data = args_cli.collect_data
     lerobot_dataset = None
@@ -542,6 +558,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 for env_id in range(num_envs):
                     if episode_tasks[env_id] is None:
                         episode_tasks[env_id] = command_term.goal_task_names[env_id]
+                        episode_task_specs[env_id] = command_term.get_task_spec(env_id)
                     elif command_term.goal_task_names[env_id] != episode_tasks[env_id]:
                         episode_task_changed[env_id] = True
                 # Acceptance is based on the terminal state, not merely on
@@ -633,17 +650,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             active_waypoint_positions_w[env_id, :2].cpu().clone()
                         )
 
-            obs, _, dones, _ = env.step(actions)
+            obs, _, dones, extras = env.step(actions)
+            if collect_data and collision_body_ids:
+                collision_forces = contact_sensor.data.net_forces_w_history[
+                    :, :, collision_body_ids, :
+                ]
+                episode_collision |= (
+                    torch.linalg.vector_norm(collision_forces, dim=-1)
+                    > args_cli.collision_force_threshold
+                ).any(dim=(1, 2))
+            # RSL-RL exposes the environment's truncation signal as
+            # ``time_outs``. Keep an explicit fallback to Isaac Lab's
+            # termination manager for wrappers/configurations that omit it.
+            episode_time_outs = extras.get("time_outs")
+            if episode_time_outs is None:
+                episode_time_outs = env.unwrapped.termination_manager.time_outs
 
             # Isaac Lab auto-resets completed environments. Save each finished
             # trajectory immediately, then start a fresh buffer for that env.
             done_env_ids = dones.nonzero(as_tuple=False).flatten().tolist()
+            retried_env_ids: list[int] = []
             for env_id in done_env_ids if collect_data else []:
                 if num_collected >= args_cli.num_episodes:
                     break
                 if (
                     not bool(episode_goal_reached[env_id].item())
                     or bool(episode_task_changed[env_id].item())
+                    or bool(episode_time_outs[env_id].item())
+                    or bool(episode_collision[env_id].item())
                 ):
                     if args_cli.dataset_format == "lerobot":
                         rejected_steps = lerobot_dataset.episode_buffer["size"]
@@ -654,7 +688,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         "[WARN] Discarded invalid oracle trajectory "
                         f"({rejected_steps} steps, task={episode_tasks[env_id]!r}, "
                         f"goal_reached={bool(episode_goal_reached[env_id].item())}, "
-                        f"task_changed={bool(episode_task_changed[env_id].item())})."
+                        f"task_changed={bool(episode_task_changed[env_id].item())}, "
+                        f"time_out={bool(episode_time_outs[env_id].item())}, "
+                        f"collision={bool(episode_collision[env_id].item())})."
+                    )
+                    rejected_instruction = episode_tasks[env_id]
+                    rejected_task_spec = episode_task_specs[env_id]
+                    if rejected_instruction is None or rejected_task_spec is None:
+                        raise RuntimeError(
+                            "Rejected trajectory has no recorded task specification to retry."
+                        )
+                    command_term.retry_task_spec(env_id, rejected_task_spec)
+                    retried_env_ids.append(env_id)
+                    print(
+                        "[INFO] Retrying rejected instruction "
+                        f"{rejected_instruction!r}."
                     )
                     continue
                 if args_cli.dataset_format == "lerobot":
@@ -689,8 +737,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             for env_id in done_env_ids if collect_data else []:
                 episode_tasks[env_id] = None
+                episode_task_specs[env_id] = None
                 episode_task_changed[env_id] = False
                 episode_goal_reached[env_id] = False
+                episode_collision[env_id] = False
+
+            if retried_env_ids:
+                # Command resampling moves scene objects after Isaac Lab's
+                # automatic reset. Propagate those writes and force a fresh
+                # camera frame so the retry's first observation matches its
+                # regenerated instruction rather than the discarded reset.
+                env.unwrapped.sim.forward()
+                retry_ids = torch.tensor(
+                    retried_env_ids,
+                    device=env.unwrapped.device,
+                    dtype=torch.long,
+                )
+                front_camera = env.unwrapped.scene["front_camera"]
+                front_camera.reset(retry_ids)
+                env.unwrapped.sim.render()
+                front_camera.update(dt, force_recompute=True)
+                obs = env.get_observations()
 
             # reset recurrent states for episodes that have terminated
             if version.parse(installed_version) >= version.parse("4.0.0"):

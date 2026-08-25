@@ -48,6 +48,25 @@ class UniformGoalVelocityCommandNearFar(UniformGoalVelocityCommandDirect):
             ]
             for slot in range(len(cfg.nominal_distances))
         ]
+        self.collision_proxies = [
+            self._env.scene[f"{cfg.distance_asset_prefix}_{slot}_collision"]
+            for slot in range(len(cfg.nominal_distances))
+        ]
+        self.candidate_pos_w = torch.zeros(
+            self.num_envs, len(cfg.nominal_distances), 3, device=self.device
+        )
+        self.selected_slots = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.route_waypoints_w = torch.zeros(
+            self.num_envs, cfg.astar_max_waypoints, 3, device=self.device
+        )
+        self.route_lengths = torch.ones(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.route_stage = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
 
     def _resample_command(self, env_ids: Sequence[int]):
         if isinstance(env_ids, slice):
@@ -62,7 +81,12 @@ class UniformGoalVelocityCommandNearFar(UniformGoalVelocityCommandDirect):
         )
 
         for env_id in env_ids.tolist():
-            variant = int(torch.randint(num_variants, (1,), device=self.device).item())
+            forced = self._forced_task_specs[env_id]
+            variant = (
+                int(forced["variant"])
+                if forced is not None
+                else int(torch.randint(num_variants, (1,), device=self.device).item())
+            )
             group_x_offset = torch.empty(1, device=self.device).uniform_(
                 *self.cfg.group_x_offset_range
             )
@@ -102,9 +126,13 @@ class UniformGoalVelocityCommandNearFar(UniformGoalVelocityCommandDirect):
                 positions[:, :2] - origin[:2], dim=-1
             )
 
-            selection_type = ("nearest", "middle", "farthest")[
-                int(torch.randint(3, (1,), device=self.device).item())
-            ]
+            selection_type = (
+                str(forced["selection_type"])
+                if forced is not None
+                else ("nearest", "middle", "farthest")[
+                    int(torch.randint(3, (1,), device=self.device).item())
+                ]
+            )
             sorted_slots = torch.argsort(planar_distances)
             selected_rank = {
                 "nearest": 0,
@@ -113,7 +141,72 @@ class UniformGoalVelocityCommandNearFar(UniformGoalVelocityCommandDirect):
             }[selection_type]
             selected_slot = int(sorted_slots[selected_rank].item())
             self.goal_pos_w[env_id] = positions[selected_slot]
+            self.candidate_pos_w[env_id] = positions
+            self.selected_slots[env_id] = selected_slot
             self.marker_indices[env_id] = variant
+
+            start_xy = self.robot.data.root_pos_w[env_id, :2]
+            goal_xy = self.goal_pos_w[env_id, :2]
+            approach_direction = start_xy - goal_xy
+            approach_direction /= torch.linalg.vector_norm(approach_direction).clamp_min(1.0e-6)
+
+            obstacles = [
+                RectangleObstacle(
+                    center=tuple(positions[slot, :2].cpu().tolist()),
+                    size=(
+                        self.cfg.candidate_obstacle_footprint,
+                        self.cfg.candidate_obstacle_footprint,
+                    ),
+                )
+                for slot in range(len(positions))
+                if slot != selected_slot
+            ]
+            path = None
+            for angle in (0.0, 0.7854, -0.7854, 1.5708, -1.5708, 3.1416):
+                cosine = torch.cos(torch.tensor(angle, device=self.device))
+                sine = torch.sin(torch.tensor(angle, device=self.device))
+                rotated_direction = torch.stack(
+                    (
+                        cosine * approach_direction[0] - sine * approach_direction[1],
+                        sine * approach_direction[0] + cosine * approach_direction[1],
+                    )
+                )
+                route_goal_xy = (
+                    goal_xy + self.cfg.goal_standoff_distance * rotated_direction
+                )
+                try:
+                    path = plan_astar(
+                        start_xy.cpu().numpy(),
+                        route_goal_xy.cpu().numpy(),
+                        obstacles,
+                        resolution=self.cfg.astar_resolution,
+                        inflation_radius=self.cfg.robot_radius + self.cfg.safety_margin,
+                        planning_margin=self.cfg.astar_planning_margin,
+                    )
+                    break
+                except RuntimeError:
+                    continue
+            if path is None:
+                raise RuntimeError("A* could not find a collision-free goal stand-off route")
+            route = path[1:]
+            if len(route) > self.cfg.astar_max_waypoints:
+                raise RuntimeError(
+                    f"A* produced {len(route)} waypoints, exceeding "
+                    f"astar_max_waypoints={self.cfg.astar_max_waypoints}"
+                )
+            route_length = max(1, len(route))
+            self.route_lengths[env_id] = route_length
+            self.route_waypoints_w[env_id].zero_()
+            if len(route):
+                self.route_waypoints_w[env_id, : len(route), :2] = torch.as_tensor(
+                    route, device=self.device
+                )
+            else:
+                self.route_waypoints_w[env_id, 0, :2] = self.goal_pos_w[env_id, :2]
+            self.route_waypoints_w[env_id, :route_length, 2] = self.robot.data.root_pos_w[
+                env_id, 2
+            ]
+            self.route_stage[env_id] = 0
 
             shape_index = variant // num_colors
             color_index = variant % num_colors
@@ -124,13 +217,21 @@ class UniformGoalVelocityCommandNearFar(UniformGoalVelocityCommandDirect):
                 "middle": self.cfg.middle_task_templates,
                 "farthest": self.cfg.farthest_task_templates,
             }[selection_type]
-            template_index = int(
-                torch.randint(len(templates), (1,), device=self.device).item()
+            template_index = (
+                int(forced["template_index"])
+                if forced is not None
+                else int(torch.randint(len(templates), (1,), device=self.device).item())
             )
             self.goal_task_names[env_id] = templates[template_index].format(
                 color=color,
                 shape=shape,
             )
+            self.task_specs[env_id] = {
+                "variant": variant,
+                "selection_type": selection_type,
+                "template_index": template_index,
+            }
+            self._forced_task_specs[env_id] = None
 
             for slot, slot_assets in enumerate(self.distance_assets):
                 for variant_index, asset in enumerate(slot_assets):
@@ -145,13 +246,67 @@ class UniformGoalVelocityCommandNearFar(UniformGoalVelocityCommandDirect):
                         root_pose,
                         env_ids=torch.tensor([env_id], device=self.device),
                     )
+                proxy = self.collision_proxies[slot]
+                proxy_pose = proxy.data.default_root_state[env_id : env_id + 1, :7].clone()
+                proxy_pose[0, :3] = origin
+                proxy_pose[0, 2] = self.cfg.unused_candidate_height
+                proxy_pose[0, :2] = positions[slot, :2]
+                proxy_pose[0, 2] = origin[2] + 0.5 * self.cfg.candidate_obstacle_height
+                proxy.write_root_pose_to_sim(
+                    proxy_pose,
+                    env_ids=torch.tensor([env_id], device=self.device),
+                )
 
         self.goal_reached[env_ids] = False
         self.goal_pos_b[env_ids] = 0.0
         self.heading_error[env_ids] = 0.0
         self.velocity_command[env_ids] = 0.0
         self.waypoint_command[env_ids] = 0.0
+        self.route_stage[env_ids] = 0
         self.goal_generation[env_ids] += 1
+
+    def _update_command(self):
+        """Follow the collision-free route while retaining the selected final goal."""
+        robot_xy = self.robot.data.root_pos_w[:, :2]
+        env_indices = torch.arange(self.num_envs, device=self.device)
+        final_stage = self.route_lengths - 1
+        active_waypoint_w = self.route_waypoints_w[env_indices, self.route_stage]
+        active_distance = torch.linalg.vector_norm(
+            active_waypoint_w[:, :2] - robot_xy, dim=-1
+        )
+        advance = (self.route_stage < final_stage) & (
+            active_distance < self.cfg.waypoint_tolerance
+        )
+        self.route_stage[advance] += 1
+
+        active_waypoint_w = self.route_waypoints_w[env_indices, self.route_stage]
+        waypoint_vec_w = active_waypoint_w - self.robot.data.root_pos_w
+        waypoint_vec_b = quat_apply_inverse(
+            yaw_quat(self.robot.data.root_quat_w), waypoint_vec_w
+        )
+        self.waypoint_command[:] = waypoint_vec_b[:, :2]
+
+        goal_vec_w = self.goal_pos_w - self.robot.data.root_pos_w
+        goal_vec_b = quat_apply_inverse(
+            yaw_quat(self.robot.data.root_quat_w), goal_vec_w
+        )
+        self.goal_pos_b[:] = goal_vec_b[:, :2]
+        goal_distance = torch.linalg.vector_norm(self.goal_pos_b, dim=-1)
+        self._update_goal_reached(goal_distance, self.route_stage == final_stage)
+
+        final_scale = torch.clamp(
+            (goal_distance - self.cfg.goal_tolerance)
+            / (self.cfg.slowdown_distance - self.cfg.goal_tolerance),
+            min=0.0,
+            max=1.0,
+        )
+        distance_scale = torch.where(
+            self.route_stage < final_stage,
+            torch.ones_like(final_scale),
+            final_scale,
+        )
+        self._waypoint_to_velocity(distance_scale)
+        self._stop_at_reached_goals()
 
 
 
@@ -170,6 +325,17 @@ class NearFarGoalVelocityCommandCfg(UniformGoalVelocityCommandCfg):
     distance_jitter: float = 0.25
     lateral_spacing_range: tuple[float, float] = (0.5, 1.5)
     lateral_group_jitter: float = 0.2
+    candidate_obstacle_footprint: float = 0.36
+    candidate_obstacle_height: float = 0.4
+    # A* targets a safe robot-base position on the near side of the selected
+    # object; goal_pos_w remains the object center used for semantic success.
+    goal_standoff_distance: float = 0.9
+    robot_radius: float = 0.35
+    safety_margin: float = 0.15
+    waypoint_tolerance: float = 0.3
+    astar_resolution: float = 0.1
+    astar_planning_margin: float = 1.0
+    astar_max_waypoints: int = 64
     nearest_task_templates: tuple[str, ...] = (
         "Go to the closest {color} {shape}",
         "Approach the nearest {color} {shape}",
@@ -188,6 +354,24 @@ class NearFarGoalVelocityCommandCfg(UniformGoalVelocityCommandCfg):
 
     def __post_init__(self):
         super().__post_init__()
+        if min(
+            self.candidate_obstacle_footprint,
+            self.candidate_obstacle_height,
+            self.goal_standoff_distance,
+            self.robot_radius,
+            self.waypoint_tolerance,
+            self.astar_resolution,
+            self.astar_planning_margin,
+        ) <= 0.0:
+            raise ValueError("Near--far planning dimensions must be positive.")
+        if self.safety_margin < 0.0:
+            raise ValueError("safety_margin must be nonnegative.")
+        if self.astar_max_waypoints <= 0:
+            raise ValueError("astar_max_waypoints must be positive.")
+        if self.goal_standoff_distance >= self.goal_tolerance:
+            raise ValueError(
+                "goal_standoff_distance must be smaller than goal_tolerance."
+            )
         if len(self.shape_instruction_names) != len(self.marker_shapes):
             raise ValueError(
                 "shape_instruction_names must align with marker_shapes."
@@ -240,4 +424,3 @@ class NearFarGoalVelocityCommandCfg(UniformGoalVelocityCommandCfg):
             raise ValueError(
                 "Near/far templates must use {color} and {shape}."
             ) from exc
-

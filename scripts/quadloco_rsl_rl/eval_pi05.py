@@ -182,7 +182,7 @@ def _non_foot_collision(env: Any, threshold: float) -> bool:
     body_ids = [
         index
         for index, name in enumerate(sensor.body_names)
-        if name == "base" or "thigh" in name or "calf" in name
+        if "foot" not in name.lower()
     ]
     if not body_ids:
         return False
@@ -390,6 +390,7 @@ def main(
                     goal_tolerance=command_term.cfg.goal_tolerance,
                     slowdown_distance=command_term.cfg.slowdown_distance,
                     minimum_approach_velocity=command_term.cfg.minimum_approach_velocity,
+                    local_waypoint_radius=command_term.cfg.local_waypoint_radius,
                 )
             else:
                 velocity_np = policy_action

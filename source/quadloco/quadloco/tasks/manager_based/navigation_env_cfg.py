@@ -49,13 +49,13 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
     #     origin_type="asset_root",
     #     env_index=0,
     # )
-    # ### Behind and above
-    # viewer = ViewerCfg(
-    #     eye=(-2.6, 0.0, 1.6),
-    #     lookat=(0.0, 0.0, 0.3),
-    #     asset_name="robot",
-    #     origin_type="asset_root",
-    # )
+    ### Behind and above
+    viewer = ViewerCfg(
+        eye=(-2.6, 0.0, 1.6),
+        lookat=(0.0, 0.0, 0.3),
+        asset_name="robot",
+        origin_type="asset_root",
+    )
     # ### Intel D435i view
     # viewer = ViewerCfg(
     #     cam_prim_path="/World/envs/env_0/Robot/base/D435i",
@@ -75,7 +75,10 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
             prim_path="{ENV_REGEX_NS}/Robot/base/D435i",
             offset=TiledCameraCfg.OffsetCfg(
                 pos=(0.30, 0.0, 0.10),
-                rot=(1.0, 0.0, 0.0, 0.0),
+                # rot=(1.0, 0.0, 0.0, 0.0),
+                rot=(0.9962, 0.0, 0.0872, 0.0), # 10deg downward
+                # rot=(0.9914, 0.0, 0.1305, 0.0), # 15deg downward
+                # rot=(0.9848, 0.0, 0.1736, 0.0), # 20deg downward
                 convention="world",
             ),
             data_types=["rgb", "distance_to_image_plane"],
@@ -105,6 +108,7 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
             resampling_time_range=(1.0e6, 1.0e6),
             debug_vis=True,
             goal_tolerance=1.0,
+            goal_release_tolerance=1.2,
             slowdown_distance=1.5,
             forward_velocity=1.0,
             yaw_gain=1.5,
@@ -116,11 +120,11 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
             candidate_y_offsets=(-1.0, 0.0, 1.0),
             # Keep the actual target x uniform on ranges.pos_x. Adding
             # independent x jitter here would broaden it beyond [4, 8] m.
-            candidate_x_error=0.0,
-            candidate_y_spacing_error=0.75,
+            candidate_x_error=1.0,
+            candidate_y_spacing_error=0.5,
             ranges=mdp.UniformGoalVelocityCommandCfg.Ranges(
-                pos_x=(4.0, 8.0),
-                pos_y=(-2.0, 2.0),
+                pos_x=(4.0, 7.0),
+                pos_y=(-1.5, 1.5),
             ),
         )
 
@@ -160,11 +164,11 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
         # self.commands.base_velocity.ranges.pos_y = (0.0, 0.0)
         # self.commands.base_velocity.candidate_y_offsets = (-1.0, 0.0, 1.0)
 
-        # Match evaluation's 0.5 s stable-stop requirement and retain enough
-        # zero-command frames to supervise stopping behavior.
+        # Require a stable stop and retain enough zero-command frames to
+        # supervise stopping behavior.
         self.terminations.goal_reached = DoneTerm(
             func=mdp.goal_reached_for_duration,
-            params={"command_name": "base_velocity", "duration_s": 0.5},
+            params={"command_name": "base_velocity", "duration_s": 1.0},
         )
 
 
@@ -344,6 +348,7 @@ class NearFarGoalNavigationEnvCfg(GoalNavigationEnvCfg):
             resampling_time_range=(1.0e6, 1.0e6),
             debug_vis=True,
             goal_tolerance=1.0,
+            goal_release_tolerance=1.2,
             slowdown_distance=1.5,
             forward_velocity=1.0,
             yaw_gain=1.5,
@@ -389,6 +394,31 @@ class NearFarGoalNavigationEnvCfg(GoalNavigationEnvCfg):
                             spawn=mdp.make_goal_object_spawn_cfg(shape, color),
                         ),
                     )
+            setattr(
+                self.scene,
+                f"{command_cfg.distance_asset_prefix}_{slot}_collision",
+                RigidObjectCfg(
+                    prim_path=f"{{ENV_REGEX_NS}}/DistanceObject_{slot}_collision",
+                    init_state=RigidObjectCfg.InitialStateCfg(
+                        pos=(0.0, 0.0, command_cfg.unused_candidate_height),
+                    ),
+                    spawn=sim_utils.CuboidCfg(
+                        visible=False,
+                        size=(
+                            command_cfg.candidate_obstacle_footprint,
+                            command_cfg.candidate_obstacle_footprint,
+                            command_cfg.candidate_obstacle_height,
+                        ),
+                        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                            kinematic_enabled=True,
+                            disable_gravity=True,
+                        ),
+                        collision_props=sim_utils.CollisionPropertiesCfg(
+                            collision_enabled=True,
+                        ),
+                    ),
+                ),
+            )
 
 
 @configclass
@@ -407,6 +437,9 @@ class ObjectRelativeGoalNavigationEnvCfg(GoalNavigationEnvCfg):
             goal_tolerance=0.2,
             slowdown_distance=0.8,
             forward_velocity=1.0,
+            # Keep moving through the low-level policy's dead zone until the
+            # strict 0.2 m object-relative goal region is actually entered.
+            minimum_approach_velocity=0.15,
             yaw_gain=1.5,
             max_yaw_rate=0.8,
             marker_height=0.4,
@@ -420,6 +453,8 @@ class ObjectRelativeGoalNavigationEnvCfg(GoalNavigationEnvCfg):
             candidate_y_spacing_error=0.3,
             ranges=mdp.ObjectRelativeGoalWaypointCommandCfg.Ranges(
                 pos_x=(4.0, 8.0),
-                pos_y=(-2.0, 2.0),
+                # Keep every object far enough from the lateral fences for the
+                # largest left/right surface offset (1.25 + 0.20 m).
+                pos_y=(-0.5, 0.5),
             ),
         )
