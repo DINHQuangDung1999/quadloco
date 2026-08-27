@@ -1,4 +1,4 @@
-# # !/usr/bin/env bash
+#!/usr/bin/env bash
 # set -euo pipefail
 
 # navigation_mode="${1:-near_far}"
@@ -34,21 +34,26 @@
 #     --depth_scale 0.001 \
 #     # --collect_data
 
-# Add --headless above for unattended collection. Depth recording is enabled
-# by default; pass --no-lerobot_include_depth only when an RGB-only dataset is
-# intentionally required.
+# Collect the two expanded RGB-D reasoning datasets.  The collector only saves
+# accepted episodes: goal reached, no timeout, no task change, and no collision.
+# Existing dataset directories are never overwritten.
+set -euo pipefail
 
-declare -A EPISODES=([direct]=200 [near_far]=200 [object_relative]=200)
-for TASK in direct near_far object_relative; do
+DATASET_ROOT="${DATASET_ROOT:-/home/summerschool/summerschool_ws/Dataset/DinhQuangDung}"
+NUM_EPISODES="${NUM_EPISODES:-1000}"
+SEED="${SEED:-42}"
+
+for TASK in near_far object_relative; do
     python scripts/quadloco_rsl_rl/run_data_collection.py \
     --navigation_mode "$TASK"  \
     --num_envs 1   \
     --checkpoint ckpt/model_999.pt  \
+    --seed "${SEED}" \
     --collect_data    \
     --dataset_format lerobot   \
-    --dataset_repo_id "DinhQuangDung/quadloco-vla-${TASK}-rgbd"  \
-    --dataset_dir "/home/summerschool/summerschool_ws/Dataset/DinhQuangDung/quadloco-vla-${TASK}-rgbd-small"   \
-    --num_episodes "${EPISODES[$TASK]}"   \
+    --dataset_repo_id "DinhQuangDung/quadloco-vla-${TASK}-rgbd-1000"  \
+    --dataset_dir "${DATASET_ROOT}/quadloco-vla-${TASK}-rgbd-1000"   \
+    --num_episodes "${NUM_EPISODES}"   \
     --depth_width 128  \
     --depth_height 96   \
     --depth_scale 0.001   \

@@ -360,8 +360,12 @@ class NearFarGoalNavigationEnvCfg(GoalNavigationEnvCfg):
             nominal_distances=(4.0, 5.5, 7.0),
             group_x_offset_range=(-2.0, 1.0),
             distance_jitter=0.5,
-            lateral_spacing_range=(0.75, 1.5),
-            lateral_group_jitter=0.5,
+            # Keep one object in each of the three lateral lanes, but avoid
+            # making lateral travel dominate the near--far decision.  The
+            # widest object center is now at most about 1.2 m from the scene
+            # centerline (1.0 m lane spacing plus 0.2 m group jitter).
+            lateral_spacing_range=(0.65, 1.0),
+            lateral_group_jitter=0.2,
             ranges=mdp.NearFarGoalVelocityCommandCfg.Ranges(
                 pos_x=(4.0, 8.0),
                 pos_y=(-2.0, 2.0),
@@ -447,14 +451,18 @@ class ObjectRelativeGoalNavigationEnvCfg(GoalNavigationEnvCfg):
             marker_colors=("red", "green", "blue"),
             shape_instruction_names=("pyramid", "box", "ball"),
             relations=("front", "behind", "left", "right"),
-            metric_offsets=(0.5, 0.75, 1.0, 1.25),
-            candidate_y_offsets=(-1.0, 0.0, 1.0),
+            metric_offsets=(0.75, 1.0, 1.25),
+            # Object-relative scenes display only the selected reference
+            # object.  Keep its three candidate slots close to the centerline
+            # so the requested relation, rather than scene placement, accounts
+            # for nearly all necessary lateral motion.
+            candidate_y_offsets=(-0.15, 0.0, 0.15),
             candidate_x_error=0.0,
-            candidate_y_spacing_error=0.3,
+            candidate_y_spacing_error=0.05,
             ranges=mdp.ObjectRelativeGoalWaypointCommandCfg.Ranges(
                 pos_x=(4.0, 8.0),
-                # Keep every object far enough from the lateral fences for the
-                # largest left/right surface offset (1.25 + 0.20 m).
-                pos_y=(-0.5, 0.5),
+                # Combined with the candidate slots above, the reference
+                # object remains within about 0.30 m of the centerline.
+                pos_y=(-0.1, 0.1),
             ),
         )
