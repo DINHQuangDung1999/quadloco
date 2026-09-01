@@ -596,7 +596,10 @@ class SmolVLAPolicy(PreTrainedPolicy):
     def prepare_state(self, batch):
         """Pad state"""
         state = batch[OBS_STATE][:, -1, :] if batch[OBS_STATE].ndim > 2 else batch[OBS_STATE]
-        if self.config.state_token_dim is not None:
+        state_feature_indices = getattr(self.config, "state_feature_indices", None)
+        if state_feature_indices is not None:
+            state = state[..., list(state_feature_indices)]
+        elif self.config.state_token_dim is not None:
             state = state[..., : self.config.state_token_dim]
         state = pad_vector(state, self.config.max_state_dim)
         return state

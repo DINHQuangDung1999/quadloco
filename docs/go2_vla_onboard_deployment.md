@@ -15,9 +15,10 @@ laptop VLA --UDP 5560, vx/vy/wz--> Go2 rl_sar --rt/lowcmd--> motors
 The onboard `rl_sar` process is the only publisher of `rt/lowcmd`. The laptop
 never publishes joint commands directly.
 
-The VLA checkpoint records a 45D state but uses `state_token_dim=42`. The Go2
-sends the first 42 values of the locomotion observation; the laptop pads the
-three excluded command values with zeros before inference.
+The VLA checkpoint records a 45D state. PI0.5 uses its first 42 values, while
+SmolVLA selects 30D (q, qdot, angular velocity, and projected gravity). The Go2
+sends the first 42 values; the laptop pads the three unavailable command values
+with zeros before inference.
 
 ## Network assumptions
 
@@ -35,7 +36,7 @@ ip -brief address
 
 Each fresh laptop task terminal must use ROS domain 0 and pin CycloneDDS to the
 robot-facing Wi-Fi interface. `QUADLOCO_KEEP_CYCLONEDDS_URI=1` prevents
-`run_go2_vla_task.sh` from removing this explicit interface configuration.
+`run_go2_vla.sh task` from removing this explicit interface configuration.
 
 The `rl_real_go2` interface argument is `eth0`, because LowState and LowCmd use
 the robot's internal Unitree DDS network. The VLA UDP bridge binds all local
@@ -182,7 +183,7 @@ inference without motion from the configured terminal:
 cd /home/dung-admin/go2_ws/quadloco
 conda activate vla
 
-bash run_go2_vla_task.sh \
+./run_go2_vla.sh task \
     --instruction "Navigate to the red ball" \
     --state-source udp \
     --robot-host 192.168.0.192
@@ -199,7 +200,7 @@ Expected startup messages include:
 Stop the dry run with `Ctrl+C`. Then start motion-enabled output:
 
 ```bash
-bash run_go2_vla_task.sh \
+./run_go2_vla.sh task \
     --instruction "Navigate to the red ball" \
     --state-source udp \
     --output udp \

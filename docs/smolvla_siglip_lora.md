@@ -67,9 +67,9 @@ structure before loading a LoRA-enabled checkpoint.
   VLM is frozen.
 - `third_party/lerobot/src/lerobot/policies/smolvla/modeling_smolvla.py`
   passes the configuration into model construction.
-- `train_smolvla_main.sh` exposes the settings to LeRobot training.
-- `run_smolvla.sh` propagates the settings and adds `siglip_lora_r<rank>` to
-  LoRA experiment names while preserving all existing non-LoRA names.
+- `run_smolvla.sh` is the unified training/evaluation entry point. It exposes
+  the settings to LeRobot and adds `siglip_lora_r<rank>` to LoRA experiment
+  names while preserving all existing non-LoRA names.
 - `scripts/test_smolvla_vision_lora.py` checks zero-output initialization,
   parameter counts, trainability, and legacy state-dict keys.
 
@@ -103,6 +103,13 @@ Evaluate the final checkpoint with the same experiment variables and:
 
 ```bash
 RUN_PHASE=eval ./run_smolvla.sh
+```
+
+The recent 30K direct-velocity RGB and RGB-D comparison is available as a
+preset instead of a separate wrapper script:
+
+```bash
+PRESET=direct_30k RUN_PHASE=all ./run_smolvla.sh
 ```
 
 Keep the first comparison RGB-only. If visual LoRA improves the 50-episode,

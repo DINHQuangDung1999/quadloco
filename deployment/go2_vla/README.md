@@ -31,7 +31,7 @@ python -c "import rclpy, message_filters, torch, lerobot; print(torch.cuda.is_av
 ```bash
 VLA_PYTHON="$PWD/.venv-deploy/bin/python" \
 VLA_CHECKPOINT=/path/to/pretrained_model \
-bash deployment/go2_vla/run.sh \
+./run_go2_vla.sh deploy \
     --instruction "Navigate to the red cube"
 ```
 
@@ -44,14 +44,14 @@ The launcher discards an inherited `CYCLONEDDS_URI` by default. Set
 ## Recorded-image test
 
 The deployment automatically supplies a zero vector matching the checkpoint's
-recorded state dimension when `--state-source zeros` is used. The current
-checkpoint accepts the recorded 45D state, then uses `state_token_dim=42` to
-exclude its final three velocity-command values before state tokenization:
+recorded state dimension when `--state-source zeros` is used. PI0.5 uses the
+first 42 values of the recorded 45D state. SmolVLA selects 30D: joint position,
+joint velocity, angular velocity, and projected gravity.
 
 ```bash
 VLA_PYTHON="$PWD/.venv-deploy/bin/python" \
 VLA_CHECKPOINT="$PWD/../pi05_rgb_direct_vel" \
-bash deployment/go2_vla/run.sh \
+./run_go2_vla.sh deploy \
     --camera-source recorded \
     --recorded-rgb /path/to/frame_rgb.png \
     --instruction "Navigate to the red cube" \
@@ -84,7 +84,7 @@ publisher of `rt/lowcmd`.
 Start with state return and computation only on the laptop:
 
 ```bash
-bash run_go2_vla_task.sh \
+./run_go2_vla.sh task \
     --instruction "Navigate to the red cube" \
     --state-source udp \
     --robot-host 192.168.0.192
@@ -93,7 +93,7 @@ bash run_go2_vla_task.sh \
 After checking the printed predictions, explicitly enable UDP motion output:
 
 ```bash
-bash run_go2_vla_task.sh \
+./run_go2_vla.sh task \
     --instruction "Navigate to the red cube" \
     --state-source udp \
     --output udp \
@@ -101,9 +101,9 @@ bash run_go2_vla_task.sh \
     --enable-motion
 ```
 
-The checkpoint has a recorded 45D state shape and `state_token_dim=42`. The
-laptop places the received 42D state in the first 42 entries and pads the final
-three excluded command entries with zeros.
+The laptop places the received 42D transport state in the first 42 entries of
+the recorded 45D shape and pads the unavailable command entries with zeros.
+PI0.5 consumes those 42 entries; SmolVLA selects indices 0--23 and 36--41.
 
 ## ROS rl_sar locomotion output
 
@@ -116,7 +116,7 @@ runs the locomotion policy, and remains the only process that publishes
 ```bash
 VLA_PYTHON="$PWD/.venv-deploy/bin/python" \
 VLA_CHECKPOINT="$PWD/../pi05_rgb_direct_vel" \
-bash deployment/go2_vla/run.sh \
+./run_go2_vla.sh deploy \
     --instruction "Navigate to the red cube" \
     --output ros \
     --cmd-vel-topic /quadloco/cmd_vel \
@@ -131,9 +131,8 @@ when it exits.
 This requires the ROS 2 build of `rl_sar`. Its standalone CMake Go2 binary is
 built without ROS and therefore does not subscribe to `/cmd_vel`.
 
-The deployment reads the raw state dimension from the checkpoint. The current
-non-leaking policy correctly declares a 45D `observation.state` feature and
-`state_token_dim=42`; its processor slices the state to the first 42 values.
+The deployment reads the raw dimension and any selected state indices from the
+checkpoint. PI0.5 uses a 42D leading slice; SmolVLA selects 30D before padding.
 
 ## Separate server and instructed task
 
@@ -150,14 +149,14 @@ an active task client.
 Start a particular task from another terminal. First use dry-run mode:
 
 ```bash
-bash run_go2_vla_task.sh --instruction "Navigate to the red cube"
+./run_go2_vla.sh task --instruction "Navigate to the red cube"
 ```
 
 After validating camera input, server inference, and the `rl_sar` navigation
 mode, explicitly arm `/quadloco/cmd_vel` output:
 
 ```bash
-bash run_go2_vla_task.sh \
+./run_go2_vla.sh task \
     --instruction "Navigate to the red cube" \
     --enable-motion
 ```
@@ -170,7 +169,7 @@ motion-enabled task must receive the exact 45D locomotion observation exported
 by the ROS build of `rl_sar`:
 
 ```bash
-bash run_go2_vla_task.sh \
+./run_go2_vla.sh task \
     --instruction "Navigate to the red cube" \
     --state-source ros \
     --policy-state-topic /quadloco/policy_state \

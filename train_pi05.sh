@@ -4,42 +4,43 @@ set -euo pipefail
 QUADLOCO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LEROBOT_ROOT="${LEROBOT_ROOT:-${QUADLOCO_ROOT}/third_party/lerobot}"
 LEROBOT_PYTHON="${LEROBOT_PYTHON:-$(command -v python)}"
-DATASET_ROOT="${DATASET_ROOT:-/home/summerschool/summerschool_ws/Dataset/DinhQuangDung/quadloco-vla-near_far-rgbd-small}"
-DATASET_REPO="${DATASET_REPO:-DinhQuangDung/quadloco-vla-all-rgbd}"
+DATASET_ROOT="${DATASET_ROOT:-/home/summerschool/summerschool_ws/Dataset/DinhQuangDung/quadloco-vla-direct-rgbd-1000}"
+DATASET_REPO="${DATASET_REPO:-DinhQuangDung/quadloco-vla-direct-rgbd-1000}"
 BASE_MODEL="${BASE_MODEL:-${QUADLOCO_ROOT}/checkpoints/pi05_base_lerobot_0.4.4}"
-MODEL_REPO="${MODEL_REPO:-DinhQuangDung/pi05-quadloco-rgbd-waypoint}"
-OUTPUT_DIR="${OUTPUT_DIR:-${QUADLOCO_ROOT}/outputs/pi05_quadloco_rgbd_near_far_50k_16x16}"
+MODEL_REPO="${MODEL_REPO:-DinhQuangDung/pi05-quadloco-rgbd-direct-1000-40k-2epoch-pairwise-add-16x16-direct-velocity-42d-state}"
+OUTPUT_DIR="${OUTPUT_DIR:-${QUADLOCO_ROOT}/outputs/pi05_quadloco_rgbd_direct_1000_40k_2epoch_pairwise_add_16x16_direct_velocity_42d-state}"
 
-STEPS="${STEPS:-18750}"
-TRAIN_SEED="${TRAIN_SEED:-42}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
+MODALITY="${MODALITY:-rgbd}"
+ACTION_MODE="${ACTION_MODE:-direct_velocity}"
+STEPS="${STEPS:-40000}"
+BATCH_SIZE="${BATCH_SIZE:-16}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
-SAVE_FREQ="${SAVE_FREQ:-100000}"
+SAVE_FREQ="${SAVE_FREQ:-${STEPS}}"
+TRAIN_SEED="${TRAIN_SEED:-42}"
+LOG_FREQ="${LOG_FREQ:-10}"
+SAVE_CHECKPOINT="${SAVE_CHECKPOINT:-true}"
 TRAIN_EXPERT_ONLY="${TRAIN_EXPERT_ONLY:-true}"
-GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-false}"
-DEPTH_TOKEN_GRID="${DEPTH_TOKEN_GRID:-[8,8]}"
-DEPTH_FUSION_MODE="${DEPTH_FUSION_MODE:-cross_attention}"
-DEPTH_MAX="${DEPTH_MAX:-20.0}"
-DEPTH_HEIGHT="${DEPTH_HEIGHT:-96}"
-DEPTH_WIDTH="${DEPTH_WIDTH:-128}"
+GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-true}"
+FREEZE_VISION_ENCODER="${FREEZE_VISION_ENCODER:-true}"
 PUSH_MODEL_TO_HUB="${PUSH_MODEL_TO_HUB:-false}"
 WANDB_ENABLE="${WANDB_ENABLE:-true}"
-ACTION_MODE="${ACTION_MODE:-${ACTION_REPRESENTATION:-waypoint}}"
-STATE_MODE="${STATE_MODE:-vision_language_only}"
+DEPTH_TOKEN_GRID="${DEPTH_TOKEN_GRID:-[16,16]}"
+DEPTH_FUSION_MODE="${DEPTH_FUSION_MODE:-pairwise_add}"
+DEPTH_MAX="${DEPTH_MAX:-10.0}"
+DEPTH_HEIGHT="${DEPTH_HEIGHT:-96}"
+DEPTH_WIDTH="${DEPTH_WIDTH:-128}"
 
-case "${STATE_MODE}" in
-    vision_language_only)
-        INPUT_FEATURES="{\"observation.images.camera1\":{\"type\":\"VISUAL\",\"shape\":[3,480,640]},\"observation.depth.camera1\":{\"type\":\"VISUAL\",\"shape\":[1,${DEPTH_HEIGHT},${DEPTH_WIDTH}]}}"
-        STATE_ENABLED=false
-        STATE_TOKEN_DIM=null
+case "${MODALITY}" in
+    rgb)
+        INPUT_FEATURES='{"observation.state":{"type":"STATE","shape":[45]},"observation.images.camera1":{"type":"VISUAL","shape":[3,480,640]}}'
+        DEPTH_ENABLED=false
         ;;
-    proprioceptive_42d)
+    rgbd)
         INPUT_FEATURES="{\"observation.state\":{\"type\":\"STATE\",\"shape\":[45]},\"observation.images.camera1\":{\"type\":\"VISUAL\",\"shape\":[3,480,640]},\"observation.depth.camera1\":{\"type\":\"VISUAL\",\"shape\":[1,${DEPTH_HEIGHT},${DEPTH_WIDTH}]}}"
-        STATE_ENABLED=true
-        STATE_TOKEN_DIM=42
+        DEPTH_ENABLED=true
         ;;
     *)
-        echo "STATE_MODE must be vision_language_only or proprioceptive_42d" >&2
+        echo "MODALITY must be rgb or rgbd" >&2
         exit 1
         ;;
 esac
@@ -48,12 +49,12 @@ case "${ACTION_MODE}" in
     waypoint)
         OUTPUT_FEATURES='{"action":{"type":"ACTION","shape":[2]}}'
         RENAME_MAP='{}'
-        JOB_NAME="pi05_quadloco_rgbd_waypoint"
+        JOB_NAME="pi05_quadloco_${MODALITY}_waypoint"
         ;;
     direct_velocity)
         OUTPUT_FEATURES='{"action":{"type":"ACTION","shape":[3]}}'
         RENAME_MAP='{"observation.velocity_command":"action"}'
-        JOB_NAME="pi05_quadloco_rgbd_direct_velocity"
+        JOB_NAME="pi05_quadloco_${MODALITY}_direct_velocity"
         ;;
     *)
         echo "ACTION_MODE must be waypoint or direct_velocity" >&2
@@ -92,8 +93,8 @@ exec "${LEROBOT_PYTHON}" "${LEROBOT_ROOT}/src/lerobot/scripts/lerobot_train.py" 
     --policy.repo_id="${MODEL_REPO}" \
     --policy.push_to_hub="${PUSH_MODEL_TO_HUB}" \
     --policy.input_features="${INPUT_FEATURES}" \
-    --policy.state_enabled="${STATE_ENABLED}" \
-    --policy.state_token_dim="${STATE_TOKEN_DIM}" \
+    --policy.state_enabled=true \
+    --policy.state_token_dim=42 \
     --policy.action_mode="${ACTION_MODE}" \
     --policy.output_features="${OUTPUT_FEATURES}" \
     --rename_map="${RENAME_MAP}" \
@@ -101,9 +102,9 @@ exec "${LEROBOT_PYTHON}" "${LEROBOT_ROOT}/src/lerobot/scripts/lerobot_train.py" 
     --policy.dtype=bfloat16 \
     --policy.gradient_checkpointing="${GRADIENT_CHECKPOINTING}" \
     --policy.compile_model=false \
-    --policy.freeze_vision_encoder=true \
+    --policy.freeze_vision_encoder="${FREEZE_VISION_ENCODER}" \
     --policy.train_expert_only="${TRAIN_EXPERT_ONLY}" \
-    --policy.depth_enabled=true \
+    --policy.depth_enabled="${DEPTH_ENABLED}" \
     --policy.depth_feature_key=observation.depth.camera1 \
     --policy.depth_scale_feature_key=observation.depth_scale \
     --policy.depth_default_scale=0.001 \
@@ -125,8 +126,9 @@ exec "${LEROBOT_PYTHON}" "${LEROBOT_ROOT}/src/lerobot/scripts/lerobot_train.py" 
     --steps="${STEPS}" \
     --batch_size="${BATCH_SIZE}" \
     --num_workers="${NUM_WORKERS}" \
-    --log_freq=10 \
+    --log_freq="${LOG_FREQ}" \
     --save_freq="${SAVE_FREQ}" \
+    --save_checkpoint="${SAVE_CHECKPOINT}" \
     --eval_freq=0 \
     --wandb.enable="${WANDB_ENABLE}" \
     --wandb.disable_artifact=true

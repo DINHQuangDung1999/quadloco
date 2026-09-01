@@ -35,6 +35,8 @@ class SocketVelocityPolicy:
             raise ValueError(f"Server does not expose a 3D direct-velocity policy: {description}")
         self.state_dim = int(description["state_dim"])
         self.state_token_dim = description.get("state_token_dim")
+        indices = description.get("state_feature_indices")
+        self.state_feature_indices = None if indices is None else tuple(indices)
         self.depth_enabled = bool(description["depth_enabled"])
         print(
             f"[POLICY] Connected to {host}:{port}; state={self.state_dim}, "

@@ -122,16 +122,20 @@ def test_pairwise_depth_fusion_backpropagates_to_gate_and_encoder():
     assert torch.isfinite(model.depth_encoder.output_projection.weight.grad).all()
 
 
-def test_state_preparation_removes_oracle_velocity_command():
+def test_state_preparation_selects_30d_proprioception():
     policy = object.__new__(SmolVLAPolicy)
     nn.Module.__init__(policy)
-    policy.config = SimpleNamespace(state_token_dim=42, max_state_dim=42)
+    indices = (*range(24), *range(36, 42))
+    policy.config = SimpleNamespace(
+        state_feature_indices=indices, state_token_dim=30, max_state_dim=32
+    )
     state = torch.arange(45, dtype=torch.float32).reshape(1, 45)
 
     prepared = policy.prepare_state({"observation.state": state})
 
-    assert prepared.shape == (1, 42)
-    torch.testing.assert_close(prepared, state[:, :42])
+    assert prepared.shape == (1, 32)
+    torch.testing.assert_close(prepared[:, :30], state[:, list(indices)])
+    torch.testing.assert_close(prepared[:, 30:], torch.zeros(1, 2))
 
 
 def test_pretrained_state_projection_can_be_widened(tmp_path):

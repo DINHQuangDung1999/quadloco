@@ -298,6 +298,7 @@ def main() -> None:
                                     "action_mode": action_mode,
                                     "state_dim": state_dim,
                                     "state_token_dim": getattr(policy_cfg, "state_token_dim", None),
+                                    "state_feature_indices": getattr(policy_cfg, "state_feature_indices", None),
                                     "depth_enabled": depth_enabled,
                                 },
                             )

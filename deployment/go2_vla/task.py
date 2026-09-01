@@ -120,10 +120,16 @@ def main() -> None:
             args.policy_state_topic, policy.state_dim, args.state_timeout
         )
     elif args.state_source == "udp":
-        if policy.state_token_dim != STATE_DIM or policy.state_dim < STATE_DIM:
+        selected_indices = policy.state_feature_indices
+        if policy.state_dim < STATE_DIM or (
+            selected_indices is not None and max(selected_indices, default=-1) >= STATE_DIM
+        ) or (
+            selected_indices is None
+            and (policy.state_token_dim is None or policy.state_token_dim > STATE_DIM)
+        ):
             raise ValueError(
-                f"UDP state bridge requires state_token_dim={STATE_DIM} and state_dim >= "
-                f"{STATE_DIM}; server reports {policy.state_token_dim}/{policy.state_dim}."
+                f"UDP state bridge supplies recorded indices 0..{STATE_DIM - 1}; server "
+                f"reports state_dim={policy.state_dim}, selected_indices={selected_indices}."
             )
         state_reader = UdpPolicyStateReader(
             args.state_port, args.state_timeout, args.robot_host

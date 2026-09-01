@@ -81,3 +81,10 @@ tests/
 /*.pdf
 /*.ipynb
 /*.sh
+!/run_smolvla.sh
+!/train_smolvla.sh
+!/eval_smolvla.sh
+!/run_pi05.sh
+!/train_pi05.sh
+!/eval_pi05.sh
+!/run_go2_vla.sh

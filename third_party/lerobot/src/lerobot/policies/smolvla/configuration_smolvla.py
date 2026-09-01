@@ -43,8 +43,9 @@ class SmolVLAConfig(PreTrainedConfig):
     # Shorter state and action vectors will be padded
     max_state_dim: int = 32
     max_action_dim: int = 32
-    # Optionally retain only the leading state values. QuadLoco uses this to
-    # remove the final three oracle velocity-command values from its 45D state.
+    # Optionally select and reorder recorded state features before padding.
+    # If unset, state_token_dim retains a leading subset for compatibility.
+    state_feature_indices: tuple[int, ...] | None = None
     state_token_dim: int | None = None
     action_mode: str = "auto"
 
@@ -166,6 +167,19 @@ class SmolVLAConfig(PreTrainedConfig):
                         f"state_token_dim={self.state_token_dim} exceeds recorded state dimension "
                         f"{recorded_state_dim}"
                     )
+        if self.state_feature_indices is not None:
+            if not self.state_feature_indices:
+                raise ValueError("state_feature_indices cannot be empty")
+            if len(set(self.state_feature_indices)) != len(self.state_feature_indices):
+                raise ValueError("state_feature_indices cannot contain duplicates")
+            if min(self.state_feature_indices) < 0:
+                raise ValueError("state_feature_indices cannot contain negative indices")
+            if len(self.state_feature_indices) > self.max_state_dim:
+                raise ValueError("state_feature_indices length cannot exceed max_state_dim")
+            if self.state_token_dim is not None and len(self.state_feature_indices) != self.state_token_dim:
+                raise ValueError("state_feature_indices length must equal state_token_dim")
+            if OBS_STATE in (self.input_features or {}) and max(self.state_feature_indices) >= self.input_features[OBS_STATE].shape[0]:
+                raise ValueError("state_feature_indices exceeds recorded state dimension")
         if self.action_mode not in ("auto", "waypoint", "direct_velocity"):
             raise ValueError(
                 "action_mode must be 'auto', 'waypoint', or 'direct_velocity', "

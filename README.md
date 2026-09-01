@@ -215,29 +215,20 @@ Metric depth is omitted by default because full-resolution float32 depth is
 large. Add `--lerobot_include_depth` when depth is required. Add
 `--push_to_hub` to upload the finalized dataset using `--dataset_repo_id`.
 
-### Train the high-level RGB-D waypoint policy
+### Train a PI0.5 policy
 
-The main launcher fine-tunes the PI0.5 action expert together with the small
-ConvNeXt depth encoder on two-dimensional robot-frame waypoint targets. Set
-the dataset, output, and Hugging Face repository values using environment
-variables when needed, then run:
-
-```bash
-bash train_pi05_depth_main.sh
-```
-
-The default dataset is the locally merged 1,500-episode RGB-D dataset. Depth
-is decoded from Z16 with a scale of `0.001` metres per unit, and the target is
-the robot-frame waypoint `[x_forward, y_left]`. Deployment converts each
-predicted waypoint deterministically into `[vx, vy, wz]` for the low-level
-locomotion policy. The legacy `train_pi05_velocity.sh` name remains as a
-compatibility wrapper.
-
-For a two-step RGB-D waypoint smoke test, run:
+Use the template-driven `run_pi05.sh` launcher for RGB or RGB-D PI0.5 training
+and evaluation. Edit its configuration block for a new setup, or override the
+same values from the shell. For example:
 
 ```bash
-bash train_vla_lerobot.sh
+RUN_PHASE=train ./run_pi05.sh
+EXPERIMENT_NAME=near_far DATASET_ROOT=/path/to/dataset EVAL_TASKS=near_far RUN_PHASE=all ./run_pi05.sh
 ```
+
+The launcher fine-tunes the PI0.5 action expert and, for RGB-D runs, the small
+ConvNeXt depth encoder. See `docs/vla_experiment_launchers.md` for the template
+fields and smoke-test settings.
 
 ## PI0.5 compatibility notes
 
