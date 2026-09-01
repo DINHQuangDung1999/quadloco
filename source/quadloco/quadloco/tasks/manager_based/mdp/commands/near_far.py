@@ -67,6 +67,7 @@ class UniformGoalVelocityCommandNearFar(UniformGoalVelocityCommandDirect):
         self.route_stage = torch.zeros(
             self.num_envs, dtype=torch.long, device=self.device
         )
+        self._selection_cycle_index = 0
 
     def _resample_command(self, env_ids: Sequence[int]):
         if isinstance(env_ids, slice):
@@ -126,13 +127,17 @@ class UniformGoalVelocityCommandNearFar(UniformGoalVelocityCommandDirect):
                 positions[:, :2] - origin[:2], dim=-1
             )
 
-            selection_type = (
-                str(forced["selection_type"])
-                if forced is not None
-                else ("nearest", "middle", "farthest")[
-                    int(torch.randint(3, (1,), device=self.device).item())
+            if forced is not None:
+                selection_type = str(forced["selection_type"])
+            elif self.cfg.cycle_selection_types:
+                selection_type = self.cfg.selection_types[
+                    self._selection_cycle_index % len(self.cfg.selection_types)
                 ]
-            )
+                self._selection_cycle_index += 1
+            else:
+                selection_type = self.cfg.selection_types[
+                    int(torch.randint(len(self.cfg.selection_types), (1,), device=self.device).item())
+                ]
             sorted_slots = torch.argsort(planar_distances)
             selected_rank = {
                 "nearest": 0,
@@ -150,45 +155,52 @@ class UniformGoalVelocityCommandNearFar(UniformGoalVelocityCommandDirect):
             approach_direction = start_xy - goal_xy
             approach_direction /= torch.linalg.vector_norm(approach_direction).clamp_min(1.0e-6)
 
-            obstacles = [
-                RectangleObstacle(
-                    center=tuple(positions[slot, :2].cpu().tolist()),
-                    size=(
-                        self.cfg.candidate_obstacle_footprint,
-                        self.cfg.candidate_obstacle_footprint,
-                    ),
-                )
-                for slot in range(len(positions))
-                if slot != selected_slot
-            ]
-            path = None
-            for angle in (0.0, 0.7854, -0.7854, 1.5708, -1.5708, 3.1416):
-                cosine = torch.cos(torch.tensor(angle, device=self.device))
-                sine = torch.sin(torch.tensor(angle, device=self.device))
-                rotated_direction = torch.stack(
-                    (
-                        cosine * approach_direction[0] - sine * approach_direction[1],
-                        sine * approach_direction[0] + cosine * approach_direction[1],
+            if self.cfg.route_planner == "direct":
+                # Match direct navigation: continuously steer toward the
+                # selected object center and rely on the shared 1 m tolerance
+                # and continuous slowdown to stop before contact. Keeping one
+                # route entry only satisfies the near--far route bookkeeping.
+                route = goal_xy.unsqueeze(0)
+            else:
+                obstacles = [
+                    RectangleObstacle(
+                        center=tuple(positions[slot, :2].cpu().tolist()),
+                        size=(
+                            self.cfg.candidate_obstacle_footprint,
+                            self.cfg.candidate_obstacle_footprint,
+                        ),
                     )
-                )
-                route_goal_xy = (
-                    goal_xy + self.cfg.goal_standoff_distance * rotated_direction
-                )
-                try:
-                    path = plan_astar(
-                        start_xy.cpu().numpy(),
-                        route_goal_xy.cpu().numpy(),
-                        obstacles,
-                        resolution=self.cfg.astar_resolution,
-                        inflation_radius=self.cfg.robot_radius + self.cfg.safety_margin,
-                        planning_margin=self.cfg.astar_planning_margin,
+                    for slot in range(len(positions))
+                    if slot != selected_slot
+                ]
+                path = None
+                for angle in (0.0, 0.7854, -0.7854, 1.5708, -1.5708, 3.1416):
+                    cosine = torch.cos(torch.tensor(angle, device=self.device))
+                    sine = torch.sin(torch.tensor(angle, device=self.device))
+                    rotated_direction = torch.stack(
+                        (
+                            cosine * approach_direction[0] - sine * approach_direction[1],
+                            sine * approach_direction[0] + cosine * approach_direction[1],
+                        )
                     )
-                    break
-                except RuntimeError:
-                    continue
-            if path is None:
-                raise RuntimeError("A* could not find a collision-free goal stand-off route")
-            route = path[1:]
+                    route_goal_xy = (
+                        goal_xy + self.cfg.goal_standoff_distance * rotated_direction
+                    )
+                    try:
+                        path = plan_astar(
+                            start_xy.cpu().numpy(),
+                            route_goal_xy.cpu().numpy(),
+                            obstacles,
+                            resolution=self.cfg.astar_resolution,
+                            inflation_radius=self.cfg.robot_radius + self.cfg.safety_margin,
+                            planning_margin=self.cfg.astar_planning_margin,
+                        )
+                        break
+                    except RuntimeError:
+                        continue
+                if path is None:
+                    raise RuntimeError("A* could not find a collision-free goal stand-off route")
+                route = path[1:]
             if len(route) > self.cfg.astar_max_waypoints:
                 raise RuntimeError(
                     f"A* produced {len(route)} waypoints, exceeding "
@@ -323,6 +335,10 @@ class NearFarGoalVelocityCommandCfg(UniformGoalVelocityCommandCfg):
     # One shared offset is added to every object's X position per reset.
     group_x_offset_range: tuple[float, float] = (0.0, 1.0)
     distance_jitter: float = 0.25
+    selection_types: tuple[str, ...] = ("nearest", "middle", "farthest")
+    cycle_selection_types: bool = False
+    route_planner: str = "astar"
+    minimum_distance_gap: float = 0.0
     lateral_spacing_range: tuple[float, float] = (0.5, 1.5)
     lateral_group_jitter: float = 0.2
     candidate_obstacle_footprint: float = 0.36
@@ -378,6 +394,15 @@ class NearFarGoalVelocityCommandCfg(UniformGoalVelocityCommandCfg):
             )
         if len(self.nominal_distances) < 2:
             raise ValueError("Near/far selection requires at least two objects.")
+        supported_selection_types = {"nearest", "middle", "farthest"}
+        if not self.selection_types or set(self.selection_types) - supported_selection_types:
+            raise ValueError(
+                "selection_types may contain only nearest, middle, and farthest."
+            )
+        if "middle" in self.selection_types and len(self.nominal_distances) < 3:
+            raise ValueError("Middle-distance selection requires at least three objects.")
+        if self.route_planner not in {"astar", "direct"}:
+            raise ValueError("route_planner must be either 'astar' or 'direct'.")
         if any(
             right <= left
             for left, right in zip(
@@ -404,6 +429,15 @@ class NearFarGoalVelocityCommandCfg(UniformGoalVelocityCommandCfg):
         if 2.0 * self.distance_jitter >= minimum_gap:
             raise ValueError(
                 "distance_jitter must preserve ordering between distance bands."
+            )
+        if self.minimum_distance_gap < 0.0:
+            raise ValueError("minimum_distance_gap must be nonnegative.")
+        guaranteed_gap = minimum_gap - 2.0 * self.distance_jitter
+        if guaranteed_gap < self.minimum_distance_gap:
+            raise ValueError(
+                "nominal_distances and distance_jitter guarantee only "
+                f"{guaranteed_gap:g} m separation, below minimum_distance_gap="
+                f"{self.minimum_distance_gap:g} m."
             )
         if (
             not self.nearest_task_templates

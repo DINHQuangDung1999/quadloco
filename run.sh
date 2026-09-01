@@ -4,19 +4,23 @@ set -euo pipefail
 QUADLOCO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATASET_BASE="${DATASET_BASE:-/home/summerschool/summerschool_ws/Dataset/DinhQuangDung}"
 EPISODES="${EPISODES:-50}"
+EVAL_EPISODE_LENGTH_S="${EVAL_EPISODE_LENGTH_S:-10.0}"
 EVAL_SEED="${EVAL_SEED:-42}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
-GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-false}"
+BATCH_SIZE="${BATCH_SIZE:-16}"
+GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-true}"
 RUN_PHASE="${RUN_PHASE:-all}"
 MODALITIES="${MODALITIES:-rgb rgbd}"
-TASKS="${TASKS:-direct near_far}"
+TASKS="${TASKS:-direct}"
 DEPTH_TOKEN_GRID="${DEPTH_TOKEN_GRID:-[16,16]}"
 DEPTH_FUSION_MODE="${DEPTH_FUSION_MODE:-pairwise_add}"
 DEPTH_MAX="${DEPTH_MAX:-10.0}"
-STEPS_OVERRIDE="${STEPS_OVERRIDE:-}"
+DEPTH_HEIGHT="${DEPTH_HEIGHT:-96}"
+DEPTH_WIDTH="${DEPTH_WIDTH:-128}"
+STEPS_OVERRIDE="${STEPS_OVERRIDE:-8000}"
 ACTION_MODE="${ACTION_MODE:-${ACTION_REPRESENTATION:-waypoint}}"
 STATE_MODE="${STATE_MODE:-proprioceptive_42d}"
 SAVE_FREQ_OVERRIDE="${SAVE_FREQ_OVERRIDE:-}"
+TASK_EPOCH_TAG="${TASK_EPOCH_TAG:-2epoch}"
 ALL_EVAL_TASKS="direct occluded relational near_far object_relative"
 
 case "${GRADIENT_CHECKPOINTING}" in
@@ -60,6 +64,26 @@ train_task() {
     esac
 
     case "${task}" in
+        near_far_two_object_200_v3)
+            dataset_root="${DATASET_BASE}/quadloco-vla-near_far_two_object-rgbd-200-v3"
+            dataset_repo="DinhQuangDung/quadloco-vla-near_far_two_object-rgbd-200-v3"
+            ;;
+        near_far_two_object_200_v2)
+            dataset_root="${DATASET_BASE}/quadloco-vla-near_far_two_object-rgbd-200-v2"
+            dataset_repo="DinhQuangDung/quadloco-vla-near_far_two_object-rgbd-200-v2"
+            ;;
+        near_far_two_object_200)
+            dataset_root="${DATASET_BASE}/quadloco-vla-near_far_two_object-rgbd-200"
+            dataset_repo="DinhQuangDung/quadloco-vla-near_far_two_object-rgbd-200"
+            ;;
+        near_far_1000)
+            dataset_root="${DATASET_BASE}/quadloco-vla-near_far-rgbd-1000"
+            dataset_repo="DinhQuangDung/quadloco-vla-near_far-rgbd-1000"
+            ;;
+        object_relative_1000)
+            dataset_root="${DATASET_BASE}/quadloco-vla-object_relative-rgbd-1000"
+            dataset_repo="DinhQuangDung/quadloco-vla-object_relative-rgbd-1000"
+            ;;
         object_relative)
             dataset_root="${DATASET_BASE}/quadloco-vla-object_relative-rgbd-small"
             dataset_repo="DinhQuangDung/quadloco-vla-object_relative-rgbd-small"
@@ -103,14 +127,29 @@ train_task() {
         esac
         experiment_tag="${experiment_tag}${TRAINING_SUFFIX}"
 
-        if [[ "${task}" == "all_1000" || "${task}" == "all_1500" ]]; then
+        if [[ "${task}" == "near_far_two_object_200_v3" ]]; then
+            output_dir="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_near_far_two_object_200_v3_${TASK_EPOCH_TAG}_${experiment_tag}"
+            model_repo="DinhQuangDung/pi05-quadloco-${modality}-near-far-two-object-200-v3-${TASK_EPOCH_TAG}-${experiment_tag//_/-}"
+        elif [[ "${task}" == "near_far_two_object_200_v2" ]]; then
+            output_dir="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_near_far_two_object_200_v2_${TASK_EPOCH_TAG}_${experiment_tag}"
+            model_repo="DinhQuangDung/pi05-quadloco-${modality}-near-far-two-object-200-v2-${TASK_EPOCH_TAG}-${experiment_tag//_/-}"
+        elif [[ "${task}" == "near_far_two_object_200" ]]; then
+            output_dir="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_near_far_two_object_200_${TASK_EPOCH_TAG}_${experiment_tag}"
+            model_repo="DinhQuangDung/pi05-quadloco-${modality}-near-far-two-object-200-${TASK_EPOCH_TAG}-${experiment_tag//_/-}"
+        elif [[ "${task}" == "near_far_1000" ]]; then
+            output_dir="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_near_far_1000_${TASK_EPOCH_TAG}_${experiment_tag}"
+            model_repo="DinhQuangDung/pi05-quadloco-${modality}-near-far-1000-${TASK_EPOCH_TAG}-${experiment_tag//_/-}"
+        elif [[ "${task}" == "object_relative_1000" ]]; then
+            output_dir="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_object_relative_1000_${TASK_EPOCH_TAG}_${experiment_tag}"
+            model_repo="DinhQuangDung/pi05-quadloco-${modality}-object-relative-1000-${TASK_EPOCH_TAG}-${experiment_tag//_/-}"
+        elif [[ "${task}" == "all_1000" || "${task}" == "all_1500" ]]; then
             output_dir="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_${task}_1epoch_${experiment_tag}"
             model_repo="DinhQuangDung/pi05-quadloco-${modality}-${task//_/-}-1epoch-${experiment_tag//_/-}"
         else
-            output_dir="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_${task}_small_1epoch_${experiment_tag}"
-            model_repo="DinhQuangDung/pi05-quadloco-${modality}-${task//_/-}-small-1epoch-${experiment_tag//_/-}"
+            output_dir="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_${task}_small_${TASK_EPOCH_TAG}_${experiment_tag}"
+            model_repo="DinhQuangDung/pi05-quadloco-${modality}-${task//_/-}-small-${TASK_EPOCH_TAG}-${experiment_tag//_/-}"
         fi
-        echo "[INFO] Training ${task} ${modality} for one epoch (${steps} optimizer steps)"
+        echo "[INFO] Training ${task} ${modality} for ${steps} optimizer steps"
         # Current experiment: RGB-only baseline. RGB-D alternatives retained
         # for controlled comparisons:
         #   DEPTH_TOKEN_GRID='[16,16]' DEPTH_FUSION_MODE=concatenate
@@ -129,13 +168,24 @@ train_task() {
         DEPTH_TOKEN_GRID="${DEPTH_TOKEN_GRID}" \
         DEPTH_FUSION_MODE="${DEPTH_FUSION_MODE}" \
         DEPTH_MAX="${DEPTH_MAX}" \
+        DEPTH_HEIGHT="${DEPTH_HEIGHT}" \
+        DEPTH_WIDTH="${DEPTH_WIDTH}" \
         bash "${QUADLOCO_ROOT}/${train_script}"
     done
 }
 
 evaluate_task() {
     local task="$1"
-    local modality experiment_tag checkpoint output_dir state_tag
+    local modality experiment_tag checkpoint output_dir state_tag eval_task
+
+    eval_task="${task}"
+    if [[ "${task}" == "near_far_two_object_200_v3" || "${task}" == "near_far_two_object_200_v2" || "${task}" == "near_far_two_object_200" ]]; then
+        eval_task="near_far_two_object"
+    elif [[ "${task}" == "near_far_1000" ]]; then
+        eval_task="near_far"
+    elif [[ "${task}" == "object_relative_1000" ]]; then
+        eval_task="object_relative"
+    fi
 
     case "${STATE_MODE}" in
         vision_language_only) state_tag="vision_language_only" ;;
@@ -168,13 +218,31 @@ evaluate_task() {
                 ;;
         esac
         experiment_tag="${experiment_tag}${TRAINING_SUFFIX}"
-        checkpoint="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_${task}_small_1epoch_${experiment_tag}/checkpoints/last/pretrained_model"
-        output_dir="${QUADLOCO_ROOT}/eval_results/${modality}_${task}_small_1epoch_${experiment_tag}"
+        if [[ "${task}" == "near_far_two_object_200_v3" ]]; then
+            checkpoint="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_near_far_two_object_200_v3_${TASK_EPOCH_TAG}_${experiment_tag}/checkpoints/last/pretrained_model"
+            output_dir="${QUADLOCO_ROOT}/eval_results/${modality}_near_far_two_object_200_v3_${TASK_EPOCH_TAG}_${experiment_tag}"
+        elif [[ "${task}" == "near_far_two_object_200_v2" ]]; then
+            checkpoint="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_near_far_two_object_200_v2_${TASK_EPOCH_TAG}_${experiment_tag}/checkpoints/last/pretrained_model"
+            output_dir="${QUADLOCO_ROOT}/eval_results/${modality}_near_far_two_object_200_v2_${TASK_EPOCH_TAG}_${experiment_tag}"
+        elif [[ "${task}" == "near_far_two_object_200" ]]; then
+            checkpoint="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_near_far_two_object_200_${TASK_EPOCH_TAG}_${experiment_tag}/checkpoints/last/pretrained_model"
+            output_dir="${QUADLOCO_ROOT}/eval_results/${modality}_near_far_two_object_200_${TASK_EPOCH_TAG}_${experiment_tag}"
+        elif [[ "${task}" == "near_far_1000" ]]; then
+            checkpoint="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_near_far_1000_${TASK_EPOCH_TAG}_${experiment_tag}/checkpoints/last/pretrained_model"
+            output_dir="${QUADLOCO_ROOT}/eval_results/${modality}_near_far_1000_${TASK_EPOCH_TAG}_${experiment_tag}"
+        elif [[ "${task}" == "object_relative_1000" ]]; then
+            checkpoint="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_object_relative_1000_${TASK_EPOCH_TAG}_${experiment_tag}/checkpoints/last/pretrained_model"
+            output_dir="${QUADLOCO_ROOT}/eval_results/${modality}_object_relative_1000_${TASK_EPOCH_TAG}_${experiment_tag}"
+        else
+            checkpoint="${QUADLOCO_ROOT}/outputs/pi05_quadloco_${modality}_${task}_small_${TASK_EPOCH_TAG}_${experiment_tag}/checkpoints/last/pretrained_model"
+            output_dir="${QUADLOCO_ROOT}/eval_results/${modality}_${task}_small_${TASK_EPOCH_TAG}_${experiment_tag}"
+        fi
         echo "[INFO] Evaluating ${task} ${modality}"
-        TASKS="${task}" \
+        TASKS="${eval_task}" \
         VLA_CHECKPOINT="${checkpoint}" \
         OUTPUT_DIR="${output_dir}" \
         EPISODES="${EPISODES}" \
+        EPISODE_LENGTH_S="${EVAL_EPISODE_LENGTH_S}" \
         EVAL_SEED="${EVAL_SEED}" \
         bash "${QUADLOCO_ROOT}/eval_pi05.sh"
     done
@@ -231,6 +299,7 @@ evaluate_all() {
     VLA_CHECKPOINT="${checkpoint}" \
     OUTPUT_DIR="${output_dir}" \
     EPISODES="${EPISODES}" \
+    EPISODE_LENGTH_S="${EVAL_EPISODE_LENGTH_S}" \
     EVAL_SEED="${EVAL_SEED}" \
     bash "${QUADLOCO_ROOT}/eval_pi05.sh"
 }
@@ -238,6 +307,101 @@ evaluate_all() {
 if [[ "${RUN_PHASE}" == "train" || "${RUN_PHASE}" == "all" ]]; then
     for task in ${TASKS}; do
         case "${task}" in
+            near_far_two_object_200_v3)
+                task_info="${DATASET_BASE}/quadloco-vla-near_far_two_object-rgbd-200-v3/meta/info.json"
+                if [[ ! -f "${task_info}" ]]; then
+                    echo "Dataset metadata not found: ${task_info}" >&2
+                    exit 1
+                fi
+                task_episodes="$(jq -r '.total_episodes' "${task_info}")"
+                task_frames="$(jq -r '.total_frames' "${task_info}")"
+                if [[ "${task_episodes}" -ne 200 ]]; then
+                    echo "near_far_two_object_200_v3 dataset has ${task_episodes} episodes; expected 200" >&2
+                    exit 1
+                fi
+                if [[ "${BATCH_SIZE}" -le 0 ]]; then
+                    echo "BATCH_SIZE must be positive" >&2
+                    exit 1
+                fi
+                task_steps="$(( (task_frames + BATCH_SIZE - 1) / BATCH_SIZE ))"
+                train_task "${task}" "${STEPS_OVERRIDE:-${task_steps}}"
+                ;;
+            near_far_two_object_200_v2)
+                task_info="${DATASET_BASE}/quadloco-vla-near_far_two_object-rgbd-200-v2/meta/info.json"
+                if [[ ! -f "${task_info}" ]]; then
+                    echo "Dataset metadata not found: ${task_info}" >&2
+                    exit 1
+                fi
+                task_episodes="$(jq -r '.total_episodes' "${task_info}")"
+                task_frames="$(jq -r '.total_frames' "${task_info}")"
+                if [[ "${task_episodes}" -ne 200 ]]; then
+                    echo "near_far_two_object_200_v2 dataset has ${task_episodes} episodes; expected 200" >&2
+                    exit 1
+                fi
+                if [[ "${BATCH_SIZE}" -le 0 ]]; then
+                    echo "BATCH_SIZE must be positive" >&2
+                    exit 1
+                fi
+                task_steps="$(( (task_frames + BATCH_SIZE - 1) / BATCH_SIZE ))"
+                train_task "${task}" "${STEPS_OVERRIDE:-${task_steps}}"
+                ;;
+            near_far_two_object_200)
+                task_info="${DATASET_BASE}/quadloco-vla-near_far_two_object-rgbd-200/meta/info.json"
+                if [[ ! -f "${task_info}" ]]; then
+                    echo "Dataset metadata not found: ${task_info}" >&2
+                    exit 1
+                fi
+                task_episodes="$(jq -r '.total_episodes' "${task_info}")"
+                task_frames="$(jq -r '.total_frames' "${task_info}")"
+                if [[ "${task_episodes}" -ne 200 ]]; then
+                    echo "near_far_two_object_200 dataset has ${task_episodes} episodes; expected 200" >&2
+                    exit 1
+                fi
+                if [[ "${BATCH_SIZE}" -le 0 ]]; then
+                    echo "BATCH_SIZE must be positive" >&2
+                    exit 1
+                fi
+                task_steps="$(( (task_frames + BATCH_SIZE - 1) / BATCH_SIZE ))"
+                train_task "${task}" "${STEPS_OVERRIDE:-${task_steps}}"
+                ;;
+            near_far_1000)
+                task_info="${DATASET_BASE}/quadloco-vla-near_far-rgbd-1000/meta/info.json"
+                if [[ ! -f "${task_info}" ]]; then
+                    echo "Dataset metadata not found: ${task_info}" >&2
+                    exit 1
+                fi
+                task_episodes="$(jq -r '.total_episodes' "${task_info}")"
+                task_frames="$(jq -r '.total_frames' "${task_info}")"
+                if [[ "${task_episodes}" -ne 1000 ]]; then
+                    echo "near_far_1000 dataset has ${task_episodes} episodes; expected 1000" >&2
+                    exit 1
+                fi
+                if [[ "${BATCH_SIZE}" -le 0 ]]; then
+                    echo "BATCH_SIZE must be positive" >&2
+                    exit 1
+                fi
+                task_steps="$(( (task_frames + BATCH_SIZE - 1) / BATCH_SIZE ))"
+                train_task "${task}" "${STEPS_OVERRIDE:-${task_steps}}"
+                ;;
+            object_relative_1000)
+                task_info="${DATASET_BASE}/quadloco-vla-object_relative-rgbd-1000/meta/info.json"
+                if [[ ! -f "${task_info}" ]]; then
+                    echo "Dataset metadata not found: ${task_info}" >&2
+                    exit 1
+                fi
+                task_episodes="$(jq -r '.total_episodes' "${task_info}")"
+                task_frames="$(jq -r '.total_frames' "${task_info}")"
+                if [[ "${task_episodes}" -ne 1000 ]]; then
+                    echo "object_relative_1000 dataset has ${task_episodes} episodes; expected 1000" >&2
+                    exit 1
+                fi
+                if [[ "${BATCH_SIZE}" -le 0 ]]; then
+                    echo "BATCH_SIZE must be positive" >&2
+                    exit 1
+                fi
+                task_steps="$(( (task_frames + BATCH_SIZE - 1) / BATCH_SIZE ))"
+                train_task "${task}" "${STEPS_OVERRIDE:-${task_steps}}"
+                ;;
             direct|near_far|occluded|object_relative)
                 task_info="${DATASET_BASE}/quadloco-vla-${task}-rgbd-small/meta/info.json"
                 if [[ ! -f "${task_info}" ]]; then

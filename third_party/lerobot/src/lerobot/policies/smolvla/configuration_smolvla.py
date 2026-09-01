@@ -21,7 +21,7 @@ from lerobot.optim.schedulers import (
     CosineDecayWithWarmupSchedulerConfig,
 )
 from lerobot.policies.rtc.configuration_rtc import RTCConfig
-from lerobot.utils.constants import OBS_IMAGES
+from lerobot.utils.constants import OBS_IMAGES, OBS_STATE
 
 
 @PreTrainedConfig.register_subclass("smolvla")
@@ -43,9 +43,31 @@ class SmolVLAConfig(PreTrainedConfig):
     # Shorter state and action vectors will be padded
     max_state_dim: int = 32
     max_action_dim: int = 32
+    # Optionally retain only the leading state values. QuadLoco uses this to
+    # remove the final three oracle velocity-command values from its 45D state.
+    state_token_dim: int | None = None
+    action_mode: str = "auto"
 
     # Image preprocessing
     resize_imgs_with_padding: tuple[int, int] = (512, 512)
+
+    # Optional metric-depth token encoder. The encoder is shared with PI0.5 so
+    # RGB-D ablations use the same ConvNeXt architecture and depth semantics.
+    depth_enabled: bool = False
+    depth_feature_key: str = "observation.depth.camera1"
+    depth_scale_feature_key: str = "observation.depth_scale"
+    depth_default_scale: float = 0.001
+    depth_min: float = 0.05
+    depth_max: float = 20.0
+    # Match the compact encoder used by the reported PI0.5 RGB-D experiments.
+    depth_stage_depths: tuple[int, ...] = (1, 1, 2)
+    depth_stage_dims: tuple[int, ...] = (32, 64, 128)
+    depth_patch_size: int = 4
+    depth_token_grid: tuple[int, int] = (8, 8)
+    depth_drop_path_rate: float = 0.0
+    depth_resize_with_rgb: bool = True
+    depth_cross_attention_heads: int = 8
+    depth_fusion_mode: str = "pairwise_add"
 
     # Add empty images. Used by smolvla_aloha_sim which adds the empty
     # left and right wrist cameras in addition to the top camera.
@@ -72,6 +94,16 @@ class SmolVLAConfig(PreTrainedConfig):
     freeze_vision_encoder: bool = True
     train_expert_only: bool = True
     train_state_proj: bool = True
+    gradient_checkpointing: bool = False
+
+    # Hybrid visual adaptation: keep the pretrained SigLIP weights frozen and
+    # train low-rank residuals inside its self-attention projections. The
+    # action expert and task-specific projectors remain ordinarily trainable.
+    vision_lora_enabled: bool = False
+    vision_lora_rank: int = 16
+    vision_lora_alpha: float = 16.0
+    vision_lora_dropout: float = 0.05
+    vision_lora_targets: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "out_proj")
 
     # Training presets
     optimizer_lr: float = 1e-4
@@ -122,6 +154,71 @@ class SmolVLAConfig(PreTrainedConfig):
             raise NotImplementedError(
                 "`use_delta_joint_actions_aloha` is used by smolvla for aloha real models. It is not ported yet in LeRobot."
             )
+        if self.state_token_dim is not None:
+            if self.state_token_dim <= 0:
+                raise ValueError("state_token_dim must be positive when provided")
+            if self.state_token_dim > self.max_state_dim:
+                raise ValueError("state_token_dim cannot exceed max_state_dim")
+            if OBS_STATE in (self.input_features or {}):
+                recorded_state_dim = self.input_features[OBS_STATE].shape[0]
+                if self.state_token_dim > recorded_state_dim:
+                    raise ValueError(
+                        f"state_token_dim={self.state_token_dim} exceeds recorded state dimension "
+                        f"{recorded_state_dim}"
+                    )
+        if self.action_mode not in ("auto", "waypoint", "direct_velocity"):
+            raise ValueError(
+                "action_mode must be 'auto', 'waypoint', or 'direct_velocity', "
+                f"got {self.action_mode!r}"
+            )
+        if self.vision_lora_enabled:
+            supported_targets = {"q_proj", "k_proj", "v_proj", "out_proj"}
+            unknown_targets = set(self.vision_lora_targets) - supported_targets
+            if self.vision_lora_rank <= 0:
+                raise ValueError("vision_lora_rank must be positive")
+            if self.vision_lora_alpha <= 0:
+                raise ValueError("vision_lora_alpha must be positive")
+            if not 0.0 <= self.vision_lora_dropout < 1.0:
+                raise ValueError("vision_lora_dropout must be in [0, 1)")
+            if not self.vision_lora_targets:
+                raise ValueError("vision_lora_targets cannot be empty")
+            if unknown_targets:
+                raise ValueError(
+                    "Unsupported SigLIP LoRA targets: "
+                    f"{sorted(unknown_targets)}; supported targets are {sorted(supported_targets)}"
+                )
+            if not self.freeze_vision_encoder:
+                raise ValueError(
+                    "vision_lora_enabled=True requires freeze_vision_encoder=True; "
+                    "otherwise the base SigLIP weights would also be updated"
+                )
+        if self.depth_enabled:
+            if self.depth_fusion_mode not in ("concatenate", "pairwise_add", "cross_attention"):
+                raise ValueError(
+                    "depth_fusion_mode must be 'concatenate', 'pairwise_add', or "
+                    f"'cross_attention', got {self.depth_fusion_mode!r}"
+                )
+            if self.depth_default_scale <= 0:
+                raise ValueError("depth_default_scale must be positive")
+            if self.depth_cross_attention_heads <= 0:
+                raise ValueError("depth_cross_attention_heads must be positive")
+            if self.depth_feature_key not in (self.input_features or {}):
+                raise ValueError(
+                    f"depth_enabled=True requires {self.depth_feature_key!r} in input_features"
+                )
+            depth_feature = self.input_features[self.depth_feature_key]
+            if depth_feature.type is not FeatureType.VISUAL:
+                raise ValueError(
+                    f"{self.depth_feature_key!r} must use FeatureType.VISUAL to bypass state normalization"
+                )
+            if len(depth_feature.shape) != 3 or 1 not in (
+                depth_feature.shape[0],
+                depth_feature.shape[-1],
+            ):
+                raise ValueError(
+                    f"{self.depth_feature_key!r} must have shape [1,H,W] or [H,W,1], "
+                    f"received {depth_feature.shape}"
+                )
 
     def validate_features(self) -> None:
         for i in range(self.empty_cameras):

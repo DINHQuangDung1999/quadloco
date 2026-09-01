@@ -10,6 +10,7 @@ VLA_CHECKPOINT="${VLA_CHECKPOINT:-${QUADLOCO_ROOT}/outputs/pi05_quadloco_rgbd_ne
 LOCOMOTION_CHECKPOINT="${LOCOMOTION_CHECKPOINT:-${QUADLOCO_ROOT}/ckpt/model_999.pt}"
 OUTPUT_DIR="${OUTPUT_DIR:-${QUADLOCO_ROOT}/eval_results/checkpoint_rgbd_near_far_50k_16x16_last}"
 EPISODES="${EPISODES:-50}"
+EPISODE_LENGTH_S="${EPISODE_LENGTH_S:-20.0}"
 EVAL_SEED="${EVAL_SEED:-42}"
 VLA_HOST="${VLA_HOST:-127.0.0.1}"
 VLA_PORT="${VLA_PORT:-5555}"
@@ -34,7 +35,7 @@ if (( ${#task_list[@]} == 0 )); then
 fi
 for task in "${task_list[@]}"; do
     case "${task}" in
-        direct|occluded|relational|near_far|object_relative) ;;
+        direct|occluded|relational|near_far|near_far_two_object|object_relative) ;;
         *)
             echo "Unsupported navigation mode in TASKS: ${task}" >&2
             exit 1
@@ -76,10 +77,11 @@ while ! (echo >"/dev/tcp/${VLA_HOST}/${VLA_PORT}") 2>/dev/null; do
 done
 
 for task in "${task_list[@]}"; do
-    echo "[INFO] Evaluating ${task} (${EPISODES} episodes, seed=${EVAL_SEED})"
+    echo "[INFO] Evaluating ${task} (${EPISODES} episodes, ${EPISODE_LENGTH_S}s limit, seed=${EVAL_SEED})"
     "${ISAACLAB_PYTHON}" scripts/quadloco_rsl_rl/eval_pi05.py \
         --navigation_mode "${task}" \
         --num_episodes "${EPISODES}" \
+        --episode_length_s "${EPISODE_LENGTH_S}" \
         --seed "${EVAL_SEED}" \
         --checkpoint "${LOCOMOTION_CHECKPOINT}" \
         --vla_host "${VLA_HOST}" \

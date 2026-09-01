@@ -23,6 +23,7 @@ def semantic_candidate_assets(command_term: Any, mode: str) -> list[Any]:
         "occluded": "candidate_assets",
         "relational": "relational_target_assets",
         "near_far": "distance_assets",
+        "near_far_two_object": "distance_assets",
     }
     if mode == "object_relative":
         # Success is defined at a generated position relative to one object;

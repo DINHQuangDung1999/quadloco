@@ -34,12 +34,14 @@ TASK_SUFFIXES = {
     "occluded": "Rough-Occluded-v0",
     "relational": "Rough-Relational-v0",
     "near_far": "Rough-NearFar-v0",
+    "near_far_two_object": "Rough-TwoObjectNearFar-v0",
     "object_relative": "Rough-ObjectRelative-v0",
 }
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--navigation_mode", choices=tuple(TASK_SUFFIXES), required=True)
 parser.add_argument("--num_episodes", type=int, default=20)
+parser.add_argument("--episode_length_s", type=float, default=20.0)
 parser.add_argument("--output_dir", type=Path, default=Path("eval_results/pi05"))
 parser.add_argument("--vla_host", default="127.0.0.1")
 parser.add_argument("--vla_port", type=int, default=5555)
@@ -66,6 +68,8 @@ if args_cli.num_envs != 1:
     parser.error("eval_pi05.py supports exactly one environment for camera-safe evaluation.")
 if args_cli.num_episodes <= 0:
     parser.error("--num_episodes must be positive.")
+if args_cli.episode_length_s <= 0:
+    parser.error("--episode_length_s must be positive.")
 if args_cli.task is None:
     args_cli.task = (
         "Unitree-Go2-Quadloco-ManagerBased-" + TASK_SUFFIXES[args_cli.navigation_mode]
@@ -158,14 +162,16 @@ def _rgb_frame(tensor: torch.Tensor) -> np.ndarray:
     return np.ascontiguousarray(frame, dtype=np.uint8)
 
 
-def _depth_z16_frame(tensor: torch.Tensor) -> np.ndarray:
+def _depth_z16_frame(
+    tensor: torch.Tensor, output_size: tuple[int, int] = (96, 128)
+) -> np.ndarray:
     depth = tensor.detach()
     if depth.ndim == 3 and depth.shape[-1] == 1:
         depth = depth[..., 0]
     if depth.ndim != 2:
         raise ValueError(f"Expected depth HWC/HW input, received {tuple(tensor.shape)}.")
     depth = torch.nn.functional.interpolate(
-        depth[None, None].float(), size=(96, 128), mode="nearest"
+        depth[None, None].float(), size=output_size, mode="nearest"
     )[0, 0]
     valid = torch.isfinite(depth) & (depth > 0)
     encoded = torch.where(valid, torch.round(depth / 0.001), 0.0)
@@ -208,12 +214,12 @@ def _wrong_target_distance(command_term: Any, robot_xy: torch.Tensor, mode: str)
 
 def _instruction_stratum(mode: str, instruction: str) -> str | None:
     text = instruction.lower()
-    if mode == "near_far":
+    if mode in ("near_far", "near_far_two_object"):
         if any(word in text for word in ("closest", "closer", "nearest")):
             return "near"
         if "middle" in text:
             return "middle"
-        if any(word in text for word in ("farthest", "most distant")):
+        if any(word in text for word in ("farthest", "most distant", "further", "farther")):
             return "far"
     if mode == "object_relative":
         relation = next(
@@ -276,6 +282,7 @@ def _write_outputs(
         "mean_path_length_m": _mean(records, "path_length_m"),
         "stratified": stratified,
         "criteria": {
+            "episode_length_s": args_cli.episode_length_s,
             "stop_hold_s": args_cli.stop_hold_s,
             "max_stopped_speed_mps": args_cli.max_stopped_speed,
             "max_stopped_yaw_rate_radps": args_cli.max_stopped_yaw_rate,
@@ -308,6 +315,7 @@ def main(
     agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, installed_version)
     env_cfg.scene.num_envs = 1
     env_cfg.seed = agent_cfg.seed
+    env_cfg.episode_length_s = args_cli.episode_length_s
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     env_cfg.scene.front_camera.data_types = ["rgb", "distance_to_image_plane"]
     env_cfg.commands.base_velocity.debug_vis = False
@@ -376,7 +384,8 @@ def main(
             loop_start = time.perf_counter()
             task = str(command_term.goal_task_names[0])
             rgb = _rgb_frame(obs["camera"]["rgb"][0])
-            depth = _depth_z16_frame(obs["camera"]["depth"][0])
+            depth_size = (192, 256) if args_cli.navigation_mode == "near_far_two_object" else (96, 128)
+            depth = _depth_z16_frame(obs["camera"]["depth"][0], depth_size)
             state = obs["policy"][0].detach().cpu().numpy().astype(np.float32, copy=False)
             policy_action, inference_s = client.predict(rgb, depth, state, task, reset_vla)
             reset_vla = False

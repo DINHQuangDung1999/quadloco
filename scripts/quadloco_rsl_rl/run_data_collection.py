@@ -31,7 +31,14 @@ parser.add_argument(
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--navigation_mode",
-    choices=("direct", "occluded", "relational", "near_far", "object_relative"),
+    choices=(
+        "direct",
+        "occluded",
+        "relational",
+        "near_far",
+        "near_far_two_object",
+        "object_relative",
+    ),
     default=None,
     help=(
         "Select the direct, occluded, relational, near/far, or object-relative "
@@ -124,6 +131,7 @@ if args_cli.navigation_mode is not None:
         "occluded": "Rough-Occluded-DataCollection-v0",
         "relational": "Rough-Relational-DataCollection-v0",
         "near_far": "Rough-NearFar-DataCollection-v0",
+        "near_far_two_object": "Rough-TwoObjectNearFar-DataCollection-v0",
         "object_relative": "Rough-ObjectRelative-DataCollection-v0",
     }[args_cli.navigation_mode]
     args_cli.task = f"Unitree-Go2-Quadloco-ManagerBased-{task_suffix}"

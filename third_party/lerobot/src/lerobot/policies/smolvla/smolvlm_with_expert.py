@@ -13,8 +13,10 @@
 # limitations under the License.
 
 import copy
+import math
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers import (
     AutoConfig,
@@ -23,6 +25,117 @@ from transformers import (
     AutoProcessor,
     SmolVLMForConditionalGeneration,
 )
+
+
+class VisionLoRALinear(nn.Linear):
+    """Frozen linear projection with a trainable low-rank residual.
+
+    Subclassing ``nn.Linear`` deliberately preserves the original ``weight``
+    and ``bias`` state-dict keys. Consequently, checkpoints created before
+    visual LoRA was added remain loadable with LeRobot's normal non-strict
+    checkpoint loading, while LoRA-enabled checkpoints remain ordinary full
+    policy checkpoints.
+    """
+
+    def __init__(
+        self,
+        base_layer: nn.Linear,
+        rank: int,
+        alpha: float,
+        dropout: float,
+    ) -> None:
+        super().__init__(
+            base_layer.in_features,
+            base_layer.out_features,
+            bias=base_layer.bias is not None,
+            device=base_layer.weight.device,
+            dtype=base_layer.weight.dtype,
+        )
+        # Reuse rather than copy the pretrained parameters. The original
+        # module is replaced immediately after construction.
+        self.weight = base_layer.weight
+        self.bias = base_layer.bias
+        self.weight.requires_grad_(False)
+        if self.bias is not None:
+            self.bias.requires_grad_(False)
+
+        self.rank = rank
+        self.alpha = float(alpha)
+        self.scaling = self.alpha / self.rank
+        self.lora_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.lora_A = nn.Linear(
+            self.in_features,
+            rank,
+            bias=False,
+            device=self.weight.device,
+            dtype=self.weight.dtype,
+        )
+        self.lora_B = nn.Linear(
+            rank,
+            self.out_features,
+            bias=False,
+            device=self.weight.device,
+            dtype=self.weight.dtype,
+        )
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B.weight)
+
+    @classmethod
+    def from_linear(
+        cls,
+        layer: nn.Linear,
+        rank: int,
+        alpha: float,
+        dropout: float,
+    ) -> "VisionLoRALinear":
+        if isinstance(layer, cls):
+            raise ValueError("SigLIP projection already has visual LoRA")
+        return cls(layer, rank=rank, alpha=alpha, dropout=dropout)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        base_output = F.linear(inputs, self.weight, self.bias)
+        residual = self.lora_B(self.lora_A(self.lora_dropout(inputs)))
+        return base_output + residual * self.scaling
+
+
+def inject_siglip_attention_lora(
+    vision_model: nn.Module,
+    *,
+    rank: int,
+    alpha: float,
+    dropout: float,
+    targets: tuple[str, ...],
+) -> tuple[int, int]:
+    """Add LoRA to selected projections in every SigLIP encoder block.
+
+    Returns the number of replaced projections and new trainable parameters.
+    """
+
+    try:
+        encoder_layers = vision_model.encoder.layers
+    except AttributeError as exc:
+        raise RuntimeError("Could not locate SigLIP encoder.layers for visual LoRA") from exc
+
+    projection_count = 0
+    parameter_count = 0
+    for layer_index, encoder_layer in enumerate(encoder_layers):
+        attention = encoder_layer.self_attn
+        for target in targets:
+            projection = getattr(attention, target, None)
+            if not isinstance(projection, nn.Linear):
+                raise RuntimeError(
+                    f"SigLIP layer {layer_index} target {target!r} is not an nn.Linear"
+                )
+            adapted = VisionLoRALinear.from_linear(
+                projection,
+                rank=rank,
+                alpha=alpha,
+                dropout=dropout,
+            )
+            setattr(attention, target, adapted)
+            projection_count += 1
+            parameter_count += adapted.lora_A.weight.numel() + adapted.lora_B.weight.numel()
+    return projection_count, parameter_count
 
 
 def apply_rope(x, positions, max_wavelength=10_000):
@@ -70,6 +183,11 @@ class SmolVLMWithExpertModel(nn.Module):
         num_vlm_layers: int = -1,
         self_attn_every_n_layers: int = -1,
         expert_width_multiplier: float = 0.5,
+        vision_lora_enabled: bool = False,
+        vision_lora_rank: int = 16,
+        vision_lora_alpha: float = 16.0,
+        vision_lora_dropout: float = 0.05,
+        vision_lora_targets: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "out_proj"),
         device: str = "auto",
     ):
         super().__init__()
@@ -128,8 +246,27 @@ class SmolVLMWithExpertModel(nn.Module):
 
         self.freeze_vision_encoder = freeze_vision_encoder
         self.train_expert_only = train_expert_only
+        self.vision_lora_enabled = vision_lora_enabled
         self.attention_mode = attention_mode
         self.expert_hidden_size = lm_expert_config.hidden_size
+        self.vision_lora_projection_count = 0
+        self.vision_lora_parameter_count = 0
+        if self.vision_lora_enabled:
+            (
+                self.vision_lora_projection_count,
+                self.vision_lora_parameter_count,
+            ) = inject_siglip_attention_lora(
+                self.get_vlm_model().vision_model,
+                rank=vision_lora_rank,
+                alpha=vision_lora_alpha,
+                dropout=vision_lora_dropout,
+                targets=vision_lora_targets,
+            )
+            print(
+                "Injected SigLIP LoRA into "
+                f"{self.vision_lora_projection_count} projections "
+                f"({self.vision_lora_parameter_count:,} trainable parameters)."
+            )
         self.set_requires_grad()
 
     def get_vlm_model(self):
@@ -166,6 +303,11 @@ class SmolVLMWithExpertModel(nn.Module):
         for name, params in self.lm_expert.named_parameters():
             if "lm_head" in name:
                 params.requires_grad = False
+        if self.vision_lora_enabled:
+            for module in self.get_vlm_model().vision_model.modules():
+                if isinstance(module, VisionLoRALinear):
+                    module.lora_A.weight.requires_grad_(True)
+                    module.lora_B.weight.requires_grad_(True)
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -175,6 +317,13 @@ class SmolVLMWithExpertModel(nn.Module):
 
         if self.train_expert_only:
             self.vlm.eval()
+
+        # Keep the frozen vision backbone deterministic while enabling dropout
+        # exclusively inside the trainable LoRA branches.
+        if self.vision_lora_enabled:
+            for module in self.get_vlm_model().vision_model.modules():
+                if isinstance(module, VisionLoRALinear):
+                    module.lora_dropout.train(mode)
 
     def embed_image(self, image: torch.Tensor):
         patch_attention_mask = None

@@ -426,6 +426,52 @@ class NearFarGoalNavigationEnvCfg(GoalNavigationEnvCfg):
 
 
 @configclass
+class TwoObjectNearFarGoalNavigationEnvCfg(NearFarGoalNavigationEnvCfg):
+    """Controlled ordinal-depth diagnostic with two identical red balls."""
+
+    def __post_init__(self):
+        # Reuse the established near--far scene assets.
+        # Only slots zero and one are addressed by the replacement command;
+        # the legacy third-slot assets remain parked at the unused height.
+        super().__post_init__()
+        self.commands.base_velocity = mdp.NearFarGoalVelocityCommandCfg(
+            asset_name="robot",
+            resampling_time_range=(1.0e6, 1.0e6),
+            debug_vis=True,
+            goal_tolerance=1.0,
+            goal_release_tolerance=1.2,
+            slowdown_distance=1.5,
+            forward_velocity=1.0,
+            yaw_gain=1.5,
+            max_yaw_rate=0.8,
+            marker_height=0.4,
+            marker_shapes=("sphere",),
+            marker_colors=("red",),
+            shape_instruction_names=("ball",),
+            # With independent +/-0.25 m jitter, the forward separation is
+            # guaranteed to remain between 2.5 and 3.5 m.
+            nominal_distances=(3.5, 6.5),
+            group_x_offset_range=(-1.0, 1.0),
+            distance_jitter=0.25,
+            selection_types=("nearest", "farthest"),
+            cycle_selection_types=True,
+            route_planner="direct",
+            minimum_distance_gap=2.5,
+            # Separate the two targets laterally so they remain visually
+            # distinct and the nearer target does not directly occlude the
+            # farther one. For two objects this is their center-to-center gap.
+            lateral_spacing_range=(1.5, 2.0),
+            lateral_group_jitter=0.2,
+            nearest_task_templates=("Navigate to the object closer to you",),
+            farthest_task_templates=("Navigate to the object further from you",),
+            ranges=mdp.NearFarGoalVelocityCommandCfg.Ranges(
+                pos_x=(3.5, 6.5),
+                pos_y=(-1.0, 1.0),
+            ),
+        )
+
+
+@configclass
 class ObjectRelativeGoalNavigationEnvCfg(GoalNavigationEnvCfg):
     """Metric standing positions relative to a single visible object."""
 

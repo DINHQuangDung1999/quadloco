@@ -20,6 +20,8 @@ GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-false}"
 DEPTH_TOKEN_GRID="${DEPTH_TOKEN_GRID:-[8,8]}"
 DEPTH_FUSION_MODE="${DEPTH_FUSION_MODE:-cross_attention}"
 DEPTH_MAX="${DEPTH_MAX:-20.0}"
+DEPTH_HEIGHT="${DEPTH_HEIGHT:-96}"
+DEPTH_WIDTH="${DEPTH_WIDTH:-128}"
 PUSH_MODEL_TO_HUB="${PUSH_MODEL_TO_HUB:-false}"
 WANDB_ENABLE="${WANDB_ENABLE:-true}"
 ACTION_MODE="${ACTION_MODE:-${ACTION_REPRESENTATION:-waypoint}}"
@@ -27,12 +29,12 @@ STATE_MODE="${STATE_MODE:-vision_language_only}"
 
 case "${STATE_MODE}" in
     vision_language_only)
-        INPUT_FEATURES='{"observation.images.camera1":{"type":"VISUAL","shape":[3,480,640]},"observation.depth.camera1":{"type":"VISUAL","shape":[1,96,128]}}'
+        INPUT_FEATURES="{\"observation.images.camera1\":{\"type\":\"VISUAL\",\"shape\":[3,480,640]},\"observation.depth.camera1\":{\"type\":\"VISUAL\",\"shape\":[1,${DEPTH_HEIGHT},${DEPTH_WIDTH}]}}"
         STATE_ENABLED=false
         STATE_TOKEN_DIM=null
         ;;
     proprioceptive_42d)
-        INPUT_FEATURES='{"observation.state":{"type":"STATE","shape":[45]},"observation.images.camera1":{"type":"VISUAL","shape":[3,480,640]},"observation.depth.camera1":{"type":"VISUAL","shape":[1,96,128]}}'
+        INPUT_FEATURES="{\"observation.state\":{\"type\":\"STATE\",\"shape\":[45]},\"observation.images.camera1\":{\"type\":\"VISUAL\",\"shape\":[3,480,640]},\"observation.depth.camera1\":{\"type\":\"VISUAL\",\"shape\":[1,${DEPTH_HEIGHT},${DEPTH_WIDTH}]}}"
         STATE_ENABLED=true
         STATE_TOKEN_DIM=42
         ;;

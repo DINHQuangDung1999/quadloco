@@ -52,15 +52,22 @@ policy = SmolVLAPolicy.from_pretrained("lerobot/smolvla_base")
 
 """
 
+import logging
 import math
 from collections import deque
 from typing import TypedDict
 
 import torch
 import torch.nn.functional as F  # noqa: N812
+from safetensors.torch import load_file
 from torch import Tensor, nn
 from typing_extensions import Unpack
 
+from lerobot.policies.pi05.depth_encoder import (
+    PI05DepthCrossAttention,
+    PI05DepthEncoder,
+    PI05DepthEncoderConfig,
+)
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.rtc.modeling_rtc import RTCProcessor
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
@@ -152,6 +159,18 @@ def resize_with_pad(img, width, height, pad_value=-1):
     # pad on left and top of image
     padded_img = F.pad(resized_img, (pad_width, 0, pad_height, 0), value=pad_value)
     return padded_img
+
+
+def resize_depth_with_pad(depth: Tensor, width: int, height: int) -> Tensor:
+    """Resize metric depth with the same top/left letterbox padding as RGB."""
+    if depth.ndim != 4 or depth.shape[1] != 1:
+        raise ValueError(f"Expected depth [B,1,H,W], received {tuple(depth.shape)}")
+    current_height, current_width = depth.shape[-2:]
+    ratio = max(current_width / width, current_height / height)
+    resized_height = int(current_height / ratio)
+    resized_width = int(current_width / ratio)
+    depth = F.interpolate(depth, size=(resized_height, resized_width), mode="nearest")
+    return F.pad(depth, (width - resized_width, 0, height - resized_height, 0), value=0)
 
 
 def pad_vector(vector, new_dim):
@@ -252,6 +271,37 @@ class SmolVLAPolicy(PreTrainedPolicy):
             ACTION: deque(maxlen=self.config.n_action_steps),
         }
 
+    @classmethod
+    def _load_as_safetensor(cls, model, model_file: str, map_location: str, strict: bool):
+        """Load a base checkpoint while safely widening the state projection."""
+        state_dict = load_file(model_file, device=map_location)
+        model_state = model.state_dict()
+        state_projection_key = "model.state_proj.weight"
+        if (
+            state_projection_key in state_dict
+            and state_projection_key in model_state
+            and state_dict[state_projection_key].shape != model_state[state_projection_key].shape
+        ):
+            source = state_dict[state_projection_key]
+            destination = model_state[state_projection_key].clone()
+            if source.shape[0] != destination.shape[0]:
+                raise RuntimeError(
+                    "Cannot resize SmolVLA state projection output dimension: "
+                    f"checkpoint={tuple(source.shape)}, model={tuple(destination.shape)}"
+                )
+            shared_width = min(source.shape[1], destination.shape[1])
+            destination[:, :shared_width].copy_(source[:, :shared_width])
+            state_dict[state_projection_key] = destination
+            logging.info(
+                "Initialized %d/%d SmolVLA state-projection columns from the pretrained checkpoint",
+                shared_width,
+                destination.shape[1],
+            )
+        model.load_state_dict(state_dict, strict=strict)
+        if map_location != "cpu":
+            model.to(map_location)
+        return model
+
     def init_rtc_processor(self):
         """Initialize RTC processor if RTC is enabled in config."""
         self.rtc_processor = None
@@ -288,8 +338,17 @@ class SmolVLAPolicy(PreTrainedPolicy):
         lang_tokens = batch[f"{OBS_LANGUAGE_TOKENS}"]
         lang_masks = batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
 
+        depth, depth_mask = self._preprocess_depth(batch)
         actions = self.model.sample_actions(
-            images, img_masks, lang_tokens, lang_masks, state, noise=noise, **kwargs
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            noise=noise,
+            depth=depth,
+            depth_mask=depth_mask,
+            **kwargs,
         )
 
         # Unpad actions
@@ -377,7 +436,19 @@ class SmolVLAPolicy(PreTrainedPolicy):
         actions = self.prepare_action(batch)
         actions_is_pad = batch.get("actions_id_pad")
         loss_dict = {}
-        losses = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
+        depth, depth_mask = self._preprocess_depth(batch)
+        losses = self.model.forward(
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            actions,
+            noise,
+            time,
+            depth=depth,
+            depth_mask=depth_mask,
+        )
         loss_dict["losses_after_forward"] = losses.clone().mean().item()
 
         if actions_is_pad is not None:
@@ -388,6 +459,9 @@ class SmolVLAPolicy(PreTrainedPolicy):
         # Remove padding
         losses = losses[:, :, : self.config.max_action_dim]
         loss_dict["losses_after_rm_padding"] = losses.clone().mean().item()
+        loss_dict.update(
+            {name: value.item() for name, value in self.model._last_depth_fusion_metrics.items()}
+        )
 
         if reduction == "none":
             # Return per-sample losses (B,) by averaging over time and action dims
@@ -406,12 +480,18 @@ class SmolVLAPolicy(PreTrainedPolicy):
         """
         images = []
         img_masks = []
-        present_img_keys = [key for key in self.config.image_features if key in batch]
-        missing_img_keys = [key for key in self.config.image_features if key not in batch]
+        rgb_image_features = {
+            key: feature
+            for key, feature in self.config.image_features.items()
+            if not (self.config.depth_enabled and key == self.config.depth_feature_key)
+        }
+        present_img_keys = [key for key in rgb_image_features if key in batch]
+        missing_img_keys = [key for key in rgb_image_features if key not in batch]
 
         if len(present_img_keys) == 0:
             raise ValueError(
-                f"All image features are missing from the batch. At least one expected. (batch: {batch.keys()}) (image_features:{self.config.image_features})"
+                f"All RGB image features are missing from the batch. At least one expected. "
+                f"(batch: {batch.keys()}) (RGB image_features: {rgb_image_features})"
             )
         # Preprocess image features present in the batch
         for key in present_img_keys:
@@ -441,6 +521,50 @@ class SmolVLAPolicy(PreTrainedPolicy):
             images.append(img)
             img_masks.append(mask)
         return images, img_masks
+
+    def _preprocess_depth(self, batch: dict[str, Tensor]) -> tuple[Tensor | None, Tensor | None]:
+        """Decode Z16 or metric depth and apply the RGB letterbox geometry."""
+        if not self.config.depth_enabled:
+            return None, None
+
+        key = self.config.depth_feature_key
+        if key not in batch:
+            raise ValueError(f"Depth-enabled SmolVLA batch is missing {key!r}")
+
+        device = next(self.parameters()).device
+        raw_depth = batch[key]
+        if raw_depth.ndim == 5:
+            raw_depth = raw_depth[:, -1]
+        depth_was_integer = not torch.is_floating_point(raw_depth)
+        depth = raw_depth.to(device=device, dtype=torch.float32)
+        if depth.ndim == 3:
+            depth = depth.unsqueeze(1)
+        elif depth.ndim == 4 and depth.shape[-1] == 1:
+            depth = depth.permute(0, 3, 1, 2)
+        if depth.ndim != 4 or depth.shape[1] != 1:
+            raise ValueError(
+                f"Expected {key!r} as [B,H,W], [B,H,W,1], or [B,1,H,W], "
+                f"received {tuple(depth.shape)}"
+            )
+
+        scale_key = self.config.depth_scale_feature_key
+        if scale_key in batch:
+            scale = batch[scale_key].to(device=device, dtype=torch.float32).reshape(-1)
+            if scale.numel() not in (1, depth.shape[0]):
+                raise ValueError(
+                    f"Expected {scale_key!r} to contain one scale or one scale per batch item, "
+                    f"received shape {tuple(batch[scale_key].shape)}"
+                )
+            if not torch.all(torch.isfinite(scale) & (scale > 0)):
+                raise ValueError(f"{scale_key!r} must contain positive finite values")
+            depth = depth * scale.reshape(-1, 1, 1, 1)
+        elif depth_was_integer:
+            depth = depth * self.config.depth_default_scale
+
+        target_width, target_height = self.config.resize_imgs_with_padding
+        if self.config.depth_resize_with_rgb and depth.shape[-2:] != (target_height, target_width):
+            depth = resize_depth_with_pad(depth, target_width, target_height)
+        return depth.contiguous(), torch.ones(depth.shape[0], dtype=torch.bool, device=device)
 
     def _pi_aloha_decode_state(self, state):
         # Flip the joints.
@@ -472,6 +596,8 @@ class SmolVLAPolicy(PreTrainedPolicy):
     def prepare_state(self, batch):
         """Pad state"""
         state = batch[OBS_STATE][:, -1, :] if batch[OBS_STATE].ndim > 2 else batch[OBS_STATE]
+        if self.config.state_token_dim is not None:
+            state = state[..., : self.config.state_token_dim]
         state = pad_vector(state, self.config.max_state_dim)
         return state
 
@@ -566,6 +692,11 @@ class VLAFlowMatching(nn.Module):
             num_vlm_layers=self.config.num_vlm_layers,
             self_attn_every_n_layers=self.config.self_attn_every_n_layers,
             expert_width_multiplier=self.config.expert_width_multiplier,
+            vision_lora_enabled=self.config.vision_lora_enabled,
+            vision_lora_rank=self.config.vision_lora_rank,
+            vision_lora_alpha=self.config.vision_lora_alpha,
+            vision_lora_dropout=self.config.vision_lora_dropout,
+            vision_lora_targets=self.config.vision_lora_targets,
             device=self.config.device if self.config.device is not None else "auto",
         )
         self.state_proj = nn.Linear(
@@ -580,6 +711,41 @@ class VLAFlowMatching(nn.Module):
         self.action_time_mlp_out = nn.Linear(
             self.vlm_with_expert.expert_hidden_size, self.vlm_with_expert.expert_hidden_size
         )
+
+        self.depth_encoder = None
+        self.depth_cross_attention = None
+        self._last_depth_fusion_metrics = {}
+        if config.depth_enabled:
+            embedding_dim = self.vlm_with_expert.config.text_config.hidden_size
+            self.depth_encoder = PI05DepthEncoder(
+                output_dim=embedding_dim,
+                config=PI05DepthEncoderConfig(
+                    depths=config.depth_stage_depths,
+                    dims=config.depth_stage_dims,
+                    patch_size=config.depth_patch_size,
+                    output_grid_size=config.depth_token_grid,
+                    min_depth=config.depth_min,
+                    max_depth=config.depth_max,
+                    drop_path_rate=config.depth_drop_path_rate,
+                ),
+            )
+            if config.depth_fusion_mode == "cross_attention":
+                self.depth_cross_attention = PI05DepthCrossAttention(
+                    embed_dim=embedding_dim,
+                    num_heads=config.depth_cross_attention_heads,
+                )
+
+        if config.gradient_checkpointing:
+            checkpointed_modules = (
+                self.vlm_with_expert.get_vlm_model(),
+                self.vlm_with_expert.lm_expert,
+            )
+            for module in checkpointed_modules:
+                if not hasattr(module, "gradient_checkpointing_enable"):
+                    raise RuntimeError(
+                        f"{type(module).__name__} does not support gradient checkpointing"
+                    )
+                module.gradient_checkpointing_enable()
 
         self.set_requires_grad()
         self.fake_image_token = self.vlm_with_expert.processor.tokenizer.fake_image_token_id
@@ -623,7 +789,14 @@ class VLAFlowMatching(nn.Module):
         return time
 
     def embed_prefix(
-        self, images, img_masks, lang_tokens, lang_masks, state: torch.Tensor = None
+        self,
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state: torch.Tensor = None,
+        depth: Tensor | None = None,
+        depth_mask: Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Embed images with SigLIP and language tokens with embedding layer to prepare
         for SmolVLM transformer processing.
@@ -660,6 +833,56 @@ class VLAFlowMatching(nn.Module):
             bsize, num_img_embs = img_emb.shape[:2]
             img_mask = img_mask[:, None].expand(bsize, num_img_embs)
 
+            if self.depth_encoder is not None and _img_idx == 0:
+                if depth is None or depth_mask is None:
+                    raise ValueError("Depth-enabled SmolVLA requires depth and depth_mask")
+                depth_emb, depth_token_mask = self.depth_encoder.encode_tokens(depth)
+                depth_emb = depth_emb.to(dtype=img_emb.dtype)
+                valid_depth_tokens = depth_token_mask & depth_mask[:, None]
+                gate = torch.tanh(self.depth_encoder.output_gate)
+                gated_depth_emb = gate * depth_emb * valid_depth_tokens.unsqueeze(-1)
+
+                self._last_depth_fusion_metrics = {
+                    "depth/effective_gate": gate.detach().float(),
+                    "depth/raw_token_rms": depth_emb.detach().float().square().mean().sqrt(),
+                    "depth/gated_token_rms": gated_depth_emb.detach().float().square().mean().sqrt(),
+                    "depth/rgb_token_rms": img_emb.detach().float().square().mean().sqrt(),
+                    "depth/valid_token_fraction": valid_depth_tokens.detach().float().mean(),
+                }
+                if self.config.depth_fusion_mode == "pairwise_add":
+                    if len(images) != 1:
+                        raise ValueError("Pairwise RGB-depth fusion requires exactly one RGB stream")
+                    if img_emb.shape != gated_depth_emb.shape:
+                        raise ValueError(
+                            "Pairwise RGB-depth fusion requires matching token shapes; "
+                            f"RGB is {tuple(img_emb.shape)} and depth is {tuple(gated_depth_emb.shape)}. "
+                            "Set depth_token_grid to the SmolVLA vision-token grid."
+                        )
+                    img_emb = img_emb + gated_depth_emb
+                    rgb_rms = self._last_depth_fusion_metrics["depth/rgb_token_rms"]
+                    gated_rms = self._last_depth_fusion_metrics["depth/gated_token_rms"]
+                    self._last_depth_fusion_metrics.update(
+                        {
+                            "depth/fused_token_rms": img_emb.detach().float().square().mean().sqrt(),
+                            "depth/gated_to_rgb_rms_ratio": gated_rms / rgb_rms.clamp_min(1e-8),
+                        }
+                    )
+                elif self.config.depth_fusion_mode == "cross_attention":
+                    if len(images) != 1:
+                        raise ValueError("RGB-depth cross-attention requires exactly one RGB stream")
+                    context = self.depth_cross_attention(img_emb, depth_emb, valid_depth_tokens)
+                    gated_context = gate * context
+                    img_emb = img_emb + gated_context
+                    rgb_rms = self._last_depth_fusion_metrics["depth/rgb_token_rms"]
+                    gated_rms = gated_context.detach().float().square().mean().sqrt()
+                    self._last_depth_fusion_metrics.update(
+                        {
+                            "depth/gated_token_rms": gated_rms,
+                            "depth/fused_token_rms": img_emb.detach().float().square().mean().sqrt(),
+                            "depth/gated_to_rgb_rms_ratio": gated_rms / rgb_rms.clamp_min(1e-8),
+                        }
+                    )
+
             embs.append(img_emb)
             pad_masks.append(img_mask)
 
@@ -678,6 +901,10 @@ class VLAFlowMatching(nn.Module):
                 embs.append(image_end_token)
                 pad_masks.append(image_end_mask)
                 att_masks += [0] * (image_end_mask.shape[1])
+        if self.depth_encoder is not None and self.config.depth_fusion_mode == "concatenate":
+            embs.append(gated_depth_emb)
+            pad_masks.append(valid_depth_tokens)
+            att_masks += [0] * gated_depth_emb.shape[1]
         lang_emb = self.vlm_with_expert.embed_language_tokens(lang_tokens)
         # Normalize language embeddings
         lang_emb_dim = lang_emb.shape[-1]
@@ -760,7 +987,17 @@ class VLAFlowMatching(nn.Module):
         return embs, pad_masks, att_masks
 
     def forward(
-        self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None
+        self,
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state,
+        actions,
+        noise=None,
+        time=None,
+        depth=None,
+        depth_mask=None,
     ) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
         if noise is None:
@@ -773,7 +1010,13 @@ class VLAFlowMatching(nn.Module):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, img_masks, lang_tokens, lang_masks, state=state
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state=state,
+            depth=depth,
+            depth_mask=depth_mask,
         )
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, time)
 
@@ -805,6 +1048,8 @@ class VLAFlowMatching(nn.Module):
         lang_masks,
         state,
         noise=None,
+        depth=None,
+        depth_mask=None,
         **kwargs: Unpack[ActionSelectKwargs],
     ) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
@@ -816,7 +1061,13 @@ class VLAFlowMatching(nn.Module):
             noise = self.sample_noise(actions_shape, device)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, img_masks, lang_tokens, lang_masks, state=state
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state=state,
+            depth=depth,
+            depth_mask=depth_mask,
         )
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1

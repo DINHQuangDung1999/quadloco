@@ -129,6 +129,23 @@ gym.register(
 )
 
 gym.register(
+    id="Unitree-Go2-Quadloco-ManagerBased-Rough-TwoObjectNearFar-DataCollection-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.rough_env_cfg:UnitreeGo2RoughTwoObjectNearFarNavEnvCfg_PLAY"
+        ),
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_rough_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_ppo_cfg:UnitreeGo2RoughPPORunnerCfg"
+        ),
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_rough_ppo_cfg.yaml",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
     id="Unitree-Go2-Quadloco-ManagerBased-Rough-ObjectRelative-DataCollection-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
@@ -154,6 +171,7 @@ _NAVIGATION_ENV_CONFIGS = {
     "Occluded": "UnitreeGo2RoughOccludedNavEnvCfg_PLAY",
     "Relational": "UnitreeGo2RoughRelationalNavEnvCfg_PLAY",
     "NearFar": "UnitreeGo2RoughNearFarNavEnvCfg_PLAY",
+    "TwoObjectNearFar": "UnitreeGo2RoughTwoObjectNearFarNavEnvCfg_PLAY",
     "ObjectRelative": "UnitreeGo2RoughObjectRelativeNavEnvCfg_PLAY",
 }
 
