@@ -26,6 +26,7 @@ PUSH_MODEL_TO_HUB="${PUSH_MODEL_TO_HUB:-false}"
 WANDB_ENABLE="${WANDB_ENABLE:-true}"
 DEPTH_TOKEN_GRID="${DEPTH_TOKEN_GRID:-[16,16]}"
 DEPTH_FUSION_MODE="${DEPTH_FUSION_MODE:-pairwise_add}"
+DEPTH_GATE_MODE="${DEPTH_GATE_MODE:-learned}"
 DEPTH_MAX="${DEPTH_MAX:-10.0}"
 DEPTH_HEIGHT="${DEPTH_HEIGHT:-96}"
 DEPTH_WIDTH="${DEPTH_WIDTH:-128}"
@@ -61,6 +62,18 @@ case "${ACTION_MODE}" in
         exit 1
         ;;
 esac
+
+case "${DEPTH_GATE_MODE}" in
+    learned|fixed_one) ;;
+    *)
+        echo "DEPTH_GATE_MODE must be learned or fixed_one" >&2
+        exit 1
+        ;;
+esac
+if [[ "${DEPTH_GATE_MODE}" == "fixed_one" && "${DEPTH_FUSION_MODE}" != "pairwise_add" ]]; then
+    echo "DEPTH_GATE_MODE=fixed_one requires DEPTH_FUSION_MODE=pairwise_add" >&2
+    exit 1
+fi
 
 if [[ ! -x "${LEROBOT_PYTHON}" ]]; then
     echo "LeRobot Python executable not found: ${LEROBOT_PYTHON}" >&2
@@ -118,6 +131,7 @@ exec "${LEROBOT_PYTHON}" "${LEROBOT_ROOT}/src/lerobot/scripts/lerobot_train.py" 
     --policy.depth_resize_with_rgb=false \
     --policy.depth_cross_attention_heads=8 \
     --policy.depth_fusion_mode="${DEPTH_FUSION_MODE}" \
+    --policy.depth_gate_mode="${DEPTH_GATE_MODE}" \
     --policy.chunk_size=50 \
     --policy.n_action_steps=10 \
     --output_dir="${OUTPUT_DIR}" \

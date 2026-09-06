@@ -110,6 +110,10 @@ class PI05Config(PreTrainedConfig):
     # "concatenate" preserves checkpoints trained with standalone depth tokens.
     # "pairwise_add" adds each gated depth token to the matching RGB token.
     depth_fusion_mode: str = "concatenate"
+    # Residual scaling for pairwise RGB-D fusion. ``learned`` preserves the
+    # original tanh(output_gate) behavior; ``fixed_one`` trains and evaluates
+    # with the full depth residual and is persisted in checkpoint config.json.
+    depth_gate_mode: str = "learned"
 
     # Optimizer settings: see openpi `AdamW`
     optimizer_lr: float = 2.5e-5  # see openpi `CosineDecaySchedule: peak_lr`
@@ -170,6 +174,13 @@ class PI05Config(PreTrainedConfig):
                     "depth_fusion_mode must be 'concatenate', 'pairwise_add', or 'cross_attention', "
                     f"got {self.depth_fusion_mode!r}"
                 )
+            if self.depth_gate_mode not in ("learned", "fixed_one"):
+                raise ValueError(
+                    "depth_gate_mode must be 'learned' or 'fixed_one', "
+                    f"got {self.depth_gate_mode!r}"
+                )
+            if self.depth_gate_mode == "fixed_one" and self.depth_fusion_mode != "pairwise_add":
+                raise ValueError("depth_gate_mode='fixed_one' requires depth_fusion_mode='pairwise_add'")
             if self.depth_cross_attention_heads <= 0:
                 raise ValueError("depth_cross_attention_heads must be positive")
             if self.depth_default_scale <= 0:

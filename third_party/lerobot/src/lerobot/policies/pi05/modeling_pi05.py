@@ -611,6 +611,11 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
                     drop_path_rate=config.depth_drop_path_rate,
                 ),
             )
+            if config.depth_gate_mode == "fixed_one":
+                # Retain the legacy parameter in the state dict so existing
+                # checkpoints remain loadable, but do not optimize an unused
+                # scalar when the residual scale is fixed by configuration.
+                self.depth_encoder.output_gate.requires_grad_(False)
             if config.depth_fusion_mode == "cross_attention":
                 self.depth_cross_attention = PI05DepthCrossAttention(
                     embed_dim=paligemma_config.width,
@@ -724,7 +729,11 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             # prefix dtype explicitly at the fusion boundary.
             if embs:
                 depth_emb = depth_emb.to(dtype=embs[0].dtype)
-            gate = torch.tanh(self.depth_encoder.output_gate)
+            gate = (
+                depth_emb.new_ones(())
+                if self.config.depth_gate_mode == "fixed_one"
+                else torch.tanh(self.depth_encoder.output_gate)
+            )
             valid_depth_tokens = depth_token_mask & depth_mask[:, None]
             gated_depth_emb = gate * depth_emb * valid_depth_tokens.unsqueeze(-1)
 
