@@ -119,6 +119,33 @@ Activate locomotion using the onboard terminal or gamepad:
 4. Confirm that `model_999/policy.onnx` loads and its contract validates.
 5. Leave navigation mode OFF until the laptop task is ready.
 
+To set weakened motor, open another terminal and run
+
+```bash
+cd ~/go2_isaac_gazebo
+
+./scripts/set_gain_alpha.py \
+  1.0 1.0 1.0 \
+  1.0 1.0 1.0 \
+  1.0 1.0 1.0 \
+  1.0 1.0 1.0
+```
+
+The joint order is
+```bash
+0  FR_hip
+1  FR_thigh
+2  FR_calf
+3  FL_hip
+4  FL_thigh
+5  FL_calf
+6  RR_hip
+7  RR_thigh
+8  RR_calf
+9  RL_hip
+10 RL_thigh
+11 RL_calf
+```
 ### Terminal 3 — Go2 camera service
 
 The camera uses the Go2's normal Foxy/Fast DDS environment. Do not apply the
@@ -135,8 +162,8 @@ export ROS_LOCALHOST_ONLY=0
 export CYCLONEDDS_URI='<CycloneDDS><Domain><General><NetworkInterfaceAddress>wlan0</NetworkInterfaceAddress></General></Domain></CycloneDDS>'
 
 ros2 launch go2_depth_camera realsense_d435i.launch.py \
-    depth_module.profile:=640,480,15 \
-    rgb_camera.profile:=640,480,15 \
+    depth_module.profile:=640,480,30 \
+    rgb_camera.profile:=640,480,30 \
     enable_sync:=true \
     align_depth.enable:=true \
     pointcloud.enable:=false

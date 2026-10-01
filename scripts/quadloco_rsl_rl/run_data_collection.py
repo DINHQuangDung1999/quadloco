@@ -63,6 +63,7 @@ parser.add_argument(
     help="Collect and save RGB-D navigation trajectories.",
 )
 parser.add_argument("--num_episodes", type=int, default=10, help="Number of trajectories to collect.")
+parser.add_argument("--record_scene_state", action="store_true", help="Include full world poses, measured velocities, object identities and camera calibration in PT episodes.")
 parser.add_argument(
     "--collision_force_threshold",
     type=float,
@@ -489,9 +490,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dt = env.unwrapped.step_dt
 
     # reset environment
+    if args_cli.collect_data:
+        # Initial command sampling moves the objects after the reset render.
+        # Refresh the camera before recording the first observation.
+        env.unwrapped.sim.forward()
+        front_camera = env.unwrapped.scene["front_camera"]
+        front_camera.reset()
+        env.unwrapped.sim.render()
+        front_camera.update(dt, force_recompute=True)
     obs = env.get_observations()
     num_envs = env.unwrapped.num_envs
     dataset_dir = os.path.abspath(args_cli.dataset_dir)
+    if args_cli.record_scene_state and args_cli.dataset_format != "pt":
+        raise ValueError("--record_scene_state requires --dataset_format pt")
+    scene_objects = env.unwrapped.scene.rigid_objects
+    state_keys = (
+        "robot_root_state_w", "robot_linear_velocity_b", "robot_angular_velocity_b",
+        "object_root_state_w", "goal_position_w", "camera_position_w",
+        "camera_quaternion_w_ros", "camera_intrinsic_matrix",
+    ) if args_cli.record_scene_state else ()
     trajectories = [
         {
             "rgb": [],
@@ -505,6 +522,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         for _ in range(num_envs)
     ]
     # Keep episode identity and completion state outside the command term. Isaac
+    for trajectory in trajectories:
+        trajectory.update({key: [] for key in state_keys})
     # Lab may resample a command at the time-limit boundary before the collector
     # observes ``done``; reading goal_task_names afresh on every frame can then
     # attach one frame of the next instruction to the episode being saved.
@@ -657,6 +676,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         trajectories[env_id]["active_waypoint_position_xy"].append(
                             active_waypoint_positions_w[env_id, :2].cpu().clone()
                         )
+                        if args_cli.record_scene_state:
+                            camera_data = env.unwrapped.scene.sensors["front_camera"].data
+                            states = {
+                                "robot_root_state_w": robot_data.root_state_w[env_id],
+                                "robot_linear_velocity_b": robot_data.root_lin_vel_b[env_id],
+                                "robot_angular_velocity_b": robot_data.root_ang_vel_b[env_id],
+                                "object_root_state_w": torch.stack([asset.data.root_state_w[env_id] for asset in scene_objects.values()]),
+                                "goal_position_w": command_term.goal_pos_w[env_id],
+                                "camera_position_w": camera_data.pos_w[env_id],
+                                "camera_quaternion_w_ros": camera_data.quat_w_ros[env_id],
+                                "camera_intrinsic_matrix": camera_data.intrinsic_matrices[env_id],
+                            }
+                            for key, value in states.items():
+                                trajectories[env_id][key].append(value.cpu().clone())
 
             obs, _, dones, extras = env.step(actions)
             if collect_data and collision_body_ids:
@@ -723,6 +756,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     }
                     trajectory["env_id"] = env_id
                     trajectory["dt"] = dt
+                    trajectory["task"] = episode_tasks[env_id]
+                    trajectory["task_spec"] = episode_task_specs[env_id]
+                    trajectory["seed"] = env_cfg.seed
+                    trajectory["checkpoint"] = resume_path
+                    trajectory["accepted"] = True
+                    trajectory["timestamp_s"] = torch.arange(len(trajectory["action"]), dtype=torch.float64) * dt
+                    if args_cli.record_scene_state:
+                        trajectory["object_names"] = list(scene_objects)
+                        trajectory["root_state_layout"] = "x,y,z,qw,qx,qy,qz,vx,vy,vz,wx,wy,wz (world; metres, seconds, radians)"
+                        trajectory["depth_description"] = "Front camera distance_to_image_plane in metres; clipping 0.1 to 20 m"
+                        trajectory["sampling_description"] = "Pre-action observations at control frequency; final post-action state is excluded because the environment auto-resets"
                     output_path = os.path.join(dataset_dir, f"trajectory_{num_collected:06d}.pt")
                     torch.save(trajectory, output_path)
                     episode_steps = trajectory["action"].shape[0]
@@ -742,6 +786,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "robot_position_xy": [],
                     "active_waypoint_position_xy": [],
                 }
+                trajectories[env_id].update({key: [] for key in state_keys})
 
             for env_id in done_env_ids if collect_data else []:
                 episode_tasks[env_id] = None

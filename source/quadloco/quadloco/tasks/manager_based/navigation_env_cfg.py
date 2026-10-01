@@ -180,7 +180,7 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
             ),
             spawn=sim_utils.UsdFileCfg(
                 usd_path=(
-                    "/home/summerschool/summerschool_ws/"
+                    "/home/dung-admin/go2_ws/"
                     "assets/rat_lab/multicorridor/lab_sense.usd"
                 ),
                 collision_props=sim_utils.CollisionPropertiesCfg(
@@ -197,7 +197,7 @@ class GoalNavigationEnvCfg(LocomotionVelocityRoughEnvCfg):
         #     ),
         #     spawn=sim_utils.UsdFileCfg(
         #         usd_path=(
-        #             "/home/summerschool/summerschool_ws/"
+        #             "/home/dung-admin/go2_ws/"
         #             "assets/kitchen/kitchen.usdc"
         #         ),
         #         collision_props=sim_utils.CollisionPropertiesCfg(

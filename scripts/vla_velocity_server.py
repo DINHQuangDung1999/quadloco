@@ -66,7 +66,7 @@ def _parse_args() -> argparse.Namespace:
         "--checkpoint",
         type=Path,
         default=Path(
-            "/home/summerschool/summerschool_ws/quadloco/outputs/"
+            "/home/dung-admin/go2_ws/quadloco/outputs/"
             "pi05_quadloco_depth_main_200k/checkpoints/last/pretrained_model"
         ),
         help="LeRobot pretrained_model directory.",

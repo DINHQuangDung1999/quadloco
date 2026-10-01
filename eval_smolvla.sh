@@ -51,6 +51,7 @@ for task in ${TASKS}; do
     "${ISAACLAB_PYTHON}" "${ROOT}/scripts/quadloco_rsl_rl/eval_pi05.py" \
         --navigation_mode "${task}" --num_episodes "${EPISODES}" \
         --episode_length_s "${EPISODE_LENGTH_S}" --seed "${EVAL_SEED}" \
-        --checkpoint "${LOCOMOTION_CHECKPOINT}" --vla_host "${VLA_HOST}" --vla_port "${VLA_PORT}" \
+        --checkpoint "${LOCOMOTION_CHECKPOINT}" --vla_checkpoint "${VLA_CHECKPOINT}" \
+        --vla_host "${VLA_HOST}" --vla_port "${VLA_PORT}" \
         --output_dir "${OUTPUT_DIR}/${task}" --headless
 done
