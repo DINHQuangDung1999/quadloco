@@ -842,7 +842,7 @@ class VLAFlowMatching(nn.Module):
                 depth_emb, depth_token_mask = self.depth_encoder.encode_tokens(depth)
                 depth_emb = depth_emb.to(dtype=img_emb.dtype)
                 valid_depth_tokens = depth_token_mask & depth_mask[:, None]
-                gate = torch.tanh(self.depth_encoder.output_gate)
+                gate = self.depth_encoder.output_gate
                 gated_depth_emb = gate * depth_emb * valid_depth_tokens.unsqueeze(-1)
 
                 self._last_depth_fusion_metrics = {

@@ -37,6 +37,7 @@ class PI05DepthEncoderConfig:
     min_depth: float = 0.05
     drop_path_rate: float = 0.0
     layer_scale_init_value: float = 1e-6
+    gate_mode: str = "learned"
 
     def __post_init__(self) -> None:
         if len(self.depths) != len(self.dims) or not self.depths:
@@ -45,6 +46,8 @@ class PI05DepthEncoderConfig:
             raise ValueError("patch_size must be positive")
         if self.min_depth <= 0 or self.max_depth <= self.min_depth:
             raise ValueError("Expected 0 < min_depth < max_depth")
+        if self.gate_mode not in ("learned", "learned_separable", "fixed_one"):
+            raise ValueError(f"Unsupported gate_mode: {self.gate_mode!r}")
 
 
 class DropPath(nn.Module):
@@ -156,7 +159,13 @@ class PI05DepthEncoder(nn.Module):
 
         self.output_norm = nn.LayerNorm(self.config.dims[-1], eps=1e-6)
         self.output_projection = nn.Linear(self.config.dims[-1], output_dim)
-        self.output_gate = nn.Parameter(torch.tensor(0.0))
+        self.output_gate = nn.Parameter(torch.tensor(1.0))
+        if self.config.gate_mode == "learned_separable":
+            rows, columns = self.config.output_grid_size
+            # Zero offsets make the initial spatial gate exactly one everywhere.
+            self.row_gate = nn.Parameter(torch.zeros(1, rows, 1, 1))
+            self.column_gate = nn.Parameter(torch.zeros(1, 1, columns, 1))
+            self.output_gate.requires_grad_(False)
         self.row_position = nn.Parameter(
             torch.zeros(1, self.config.output_grid_size[0], 1, output_dim)
         )
@@ -197,10 +206,16 @@ class PI05DepthEncoder(nn.Module):
         token_mask = torch.ones(tokens.shape[:2], dtype=torch.bool, device=tokens.device)
         return tokens, token_mask
 
+    def effective_gate(self) -> Tensor:
+        """Return the scalar gate or flattened additive row/column mask."""
+        if self.config.gate_mode == "learned_separable":
+            return (1.0 + self.row_gate + self.column_gate).flatten(1, 2)
+        return self.output_gate
+
     def forward(self, depth: Tensor) -> tuple[Tensor, Tensor]:
         """Return gated tokens, retaining the original standalone encoder API."""
         tokens, token_mask = self.encode_tokens(depth)
-        return torch.tanh(self.output_gate) * tokens, token_mask
+        return self.effective_gate() * tokens, token_mask
 
 
 class PI05DepthCrossAttention(nn.Module):

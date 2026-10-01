@@ -140,8 +140,17 @@ def update_policy(
             output_dict["depth/grad_norm_preclip"] = depth_grad_norm.item()
         if depth_encoder.output_gate.grad is not None:
             output_dict["depth/gate_grad_abs_preclip"] = (
-                depth_encoder.output_gate.grad.detach().abs().item()
+                depth_encoder.output_gate.grad.detach().abs().mean().item()
             )
+        spatial_gate_gradients = [
+            parameter.grad.detach().flatten()
+            for name, parameter in depth_encoder.named_parameters()
+            if name in ("row_gate", "column_gate") and parameter.grad is not None
+        ]
+        if spatial_gate_gradients:
+            gate_gradient = torch.cat(spatial_gate_gradients).abs()
+            output_dict["depth/gate_grad_abs_preclip"] = gate_gradient.mean().item()
+            output_dict["depth/gate_grad_max_preclip"] = gate_gradient.max().item()
     if depth_cross_attention is not None:
         cross_attention_parameters = [
             parameter

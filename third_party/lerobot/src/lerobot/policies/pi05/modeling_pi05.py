@@ -609,6 +609,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
                     min_depth=config.depth_min,
                     max_depth=config.depth_max,
                     drop_path_rate=config.depth_drop_path_rate,
+                    gate_mode=config.depth_gate_mode,
                 ),
             )
             if config.depth_gate_mode == "fixed_one":
@@ -732,16 +733,36 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             gate = (
                 depth_emb.new_ones(())
                 if self.config.depth_gate_mode == "fixed_one"
-                else torch.tanh(self.depth_encoder.output_gate)
+                else self.depth_encoder.effective_gate()
             )
             valid_depth_tokens = depth_token_mask & depth_mask[:, None]
             gated_depth_emb = gate * depth_emb * valid_depth_tokens.unsqueeze(-1)
 
             self._last_depth_fusion_metrics = {
-                "depth/effective_gate": gate.detach().float(),
+                "depth/effective_gate": gate.detach().float().mean(),
+                "depth/gate_min": gate.detach().float().min(),
+                "depth/gate_max": gate.detach().float().max(),
+                "depth/gate_std": gate.detach().float().std(unbiased=False),
                 "depth/raw_token_rms": depth_emb.detach().float().square().mean().sqrt(),
                 "depth/gated_token_rms": gated_depth_emb.detach().float().square().mean().sqrt(),
             }
+            if self.config.depth_gate_mode == "learned_separable":
+                self._last_depth_fusion_metrics.update(
+                    {
+                        **{
+                            f"depth/gate_row_{index:02d}": value
+                            for index, value in enumerate(
+                                self.depth_encoder.row_gate.detach().float().flatten()
+                            )
+                        },
+                        **{
+                            f"depth/gate_column_{index:02d}": value
+                            for index, value in enumerate(
+                                self.depth_encoder.column_gate.detach().float().flatten()
+                            )
+                        },
+                    }
+                )
 
             if self.config.depth_fusion_mode == "cross_attention":
                 if len(embs) != 1:
@@ -769,7 +790,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
                 self._last_depth_fusion_metrics.update(
                     {
                         "depth/attention_context_rms": context_rms,
-                        "depth/effective_gate": gate.detach().float(),
+                        "depth/effective_gate": gate.detach().float().mean(),
                         "depth/gated_token_rms": gated_context_rms,
                         "depth/rgb_token_rms": rgb_rms,
                         "depth/fused_token_rms": fused_emb.detach().float().square().mean().sqrt(),

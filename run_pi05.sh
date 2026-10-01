@@ -5,7 +5,7 @@ set -euo pipefail
 # Experiment template: edit this block for a new setup, or override any value
 # from the shell. No task-specific wrapper or preset entry is required.
 # ---------------------------------------------------------------------------
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-direct_200_40k_bs2_local_repro}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-direct_small_40k_bs2_separable_gate_init1}"
 DATASET_ROOT="${DATASET_ROOT:-/home/summerschool/summerschool_ws/Dataset/DinhQuangDung/quadloco-vla-direct-rgbd-small}"
 DATASET_REPO="${DATASET_REPO:-DinhQuangDung/quadloco-vla-direct-rgbd-small}"
 EVAL_TASKS="${EVAL_TASKS:-direct}"
@@ -18,12 +18,12 @@ DEPTH_HEIGHT="${DEPTH_HEIGHT:-96}"
 DEPTH_WIDTH="${DEPTH_WIDTH:-128}"
 DEPTH_TOKEN_GRID="${DEPTH_TOKEN_GRID:-[16,16]}"
 DEPTH_FUSION_MODE="${DEPTH_FUSION_MODE:-pairwise_add}"
-DEPTH_GATE_MODE="${DEPTH_GATE_MODE:-fixed_one}"
+DEPTH_GATE_MODE="${DEPTH_GATE_MODE:-learned_separable}"
 
 # Shared execution settings rarely need editing.
 RUN_PHASE="${RUN_PHASE:-all}"
 DRY_RUN="${DRY_RUN:-false}"
-SAVE_FREQ="${SAVE_FREQ:-10000}"
+SAVE_FREQ="${SAVE_FREQ:-40000}"
 SAVE_CHECKPOINT="${SAVE_CHECKPOINT:-true}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 TRAIN_SEED="${TRAIN_SEED:-42}"
@@ -42,9 +42,9 @@ BASE_MODEL="${BASE_MODEL:-${ROOT}/checkpoints/pi05_base_lerobot_0.4.4}"
 case "${RUN_PHASE}" in train|eval|all) ;; *) echo "RUN_PHASE must be train, eval, or all" >&2; exit 2 ;; esac
 case "${DRY_RUN}" in true|false) ;; *) echo "DRY_RUN must be true or false" >&2; exit 2 ;; esac
 case "${ACTION_MODE}" in waypoint|direct_velocity) ;; *) echo "ACTION_MODE must be waypoint or direct_velocity" >&2; exit 2 ;; esac
-case "${DEPTH_GATE_MODE}" in learned|fixed_one) ;; *) echo "DEPTH_GATE_MODE must be learned or fixed_one" >&2; exit 2 ;; esac
-if [[ "${DEPTH_GATE_MODE}" == "fixed_one" && "${DEPTH_FUSION_MODE}" != "pairwise_add" ]]; then
-    echo "DEPTH_GATE_MODE=fixed_one requires DEPTH_FUSION_MODE=pairwise_add" >&2
+case "${DEPTH_GATE_MODE}" in learned|learned_separable|fixed_one) ;; *) echo "DEPTH_GATE_MODE must be learned, learned_separable, or fixed_one" >&2; exit 2 ;; esac
+if [[ "${DEPTH_GATE_MODE}" != "learned" && "${DEPTH_FUSION_MODE}" != "pairwise_add" ]]; then
+    echo "DEPTH_GATE_MODE=${DEPTH_GATE_MODE} requires DEPTH_FUSION_MODE=pairwise_add" >&2
     exit 2
 fi
 (( STEPS > 0 && BATCH_SIZE > 0 && NUM_WORKERS >= 0 )) || { echo "Invalid numeric training setting" >&2; exit 2; }

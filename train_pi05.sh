@@ -64,14 +64,14 @@ case "${ACTION_MODE}" in
 esac
 
 case "${DEPTH_GATE_MODE}" in
-    learned|fixed_one) ;;
+    learned|learned_separable|fixed_one) ;;
     *)
-        echo "DEPTH_GATE_MODE must be learned or fixed_one" >&2
+        echo "DEPTH_GATE_MODE must be learned, learned_separable, or fixed_one" >&2
         exit 1
         ;;
 esac
-if [[ "${DEPTH_GATE_MODE}" == "fixed_one" && "${DEPTH_FUSION_MODE}" != "pairwise_add" ]]; then
-    echo "DEPTH_GATE_MODE=fixed_one requires DEPTH_FUSION_MODE=pairwise_add" >&2
+if [[ "${DEPTH_GATE_MODE}" != "learned" && "${DEPTH_FUSION_MODE}" != "pairwise_add" ]]; then
+    echo "DEPTH_GATE_MODE=${DEPTH_GATE_MODE} requires DEPTH_FUSION_MODE=pairwise_add" >&2
     exit 1
 fi
 

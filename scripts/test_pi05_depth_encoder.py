@@ -29,8 +29,8 @@ def test_depth_encoder_returns_prefix_tokens_and_mask():
     assert mask.shape == (2, 20)
     assert mask.dtype == torch.bool
     assert mask.all()
-    # The zero gate preserves pretrained PI0.5 behavior at initialization.
-    torch.testing.assert_close(tokens, torch.zeros_like(tokens))
+    # The learnable gate starts at full residual strength.
+    assert encoder.output_gate.item() == 1.0
 
     # Pairwise fusion uses these ungated tokens and applies the gate once at
     # the RGB fusion boundary.
@@ -39,12 +39,15 @@ def test_depth_encoder_returns_prefix_tokens_and_mask():
     assert raw_mask.equal(mask)
     assert raw_tokens.abs().sum() > 0
     rgb_tokens = torch.randn_like(raw_tokens)
-    fused_at_zero = rgb_tokens + torch.tanh(encoder.output_gate) * raw_tokens
-    torch.testing.assert_close(fused_at_zero, rgb_tokens)
+    fused_at_init = rgb_tokens + encoder.output_gate * raw_tokens
+    torch.testing.assert_close(
+        fused_at_init - rgb_tokens,
+        raw_tokens,
+    )
 
     encoder.output_gate.data.fill_(0.2)
-    fused = rgb_tokens + torch.tanh(encoder.output_gate) * raw_tokens
-    torch.testing.assert_close(fused - rgb_tokens, torch.tanh(encoder.output_gate) * raw_tokens)
+    fused = rgb_tokens + encoder.output_gate * raw_tokens
+    torch.testing.assert_close(fused - rgb_tokens, encoder.output_gate * raw_tokens)
 
 
 def test_depth_encoder_handles_invalid_depth_and_backpropagates():
@@ -58,6 +61,26 @@ def test_depth_encoder_handles_invalid_depth_and_backpropagates():
 
     assert torch.isfinite(tokens).all()
     assert encoder.output_projection.weight.grad is not None
+
+
+def test_separable_gate_starts_as_full_residual_and_learns_spatially():
+    config = PI05DepthEncoderConfig(
+        depths=(1,), dims=(8,), output_grid_size=(4, 5), gate_mode="learned_separable"
+    )
+    encoder = PI05DepthEncoder(output_dim=12, config=config)
+    depth = torch.rand(2, 1, 16, 20) + 0.1
+
+    raw_tokens, _ = encoder.encode_tokens(depth)
+    gated_tokens, _ = encoder(depth)
+
+    assert encoder.effective_gate().shape == (1, 20, 1)
+    torch.testing.assert_close(encoder.effective_gate(), torch.ones(1, 20, 1))
+    torch.testing.assert_close(gated_tokens, raw_tokens)
+
+    gated_tokens.square().mean().backward()
+    assert encoder.row_gate.grad is not None
+    assert encoder.column_gate.grad is not None
+    assert encoder.output_gate.grad is None
 
 
 def test_depth_encoder_rejects_rgb_input():
